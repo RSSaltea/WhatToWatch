@@ -116,7 +116,7 @@ function render() {
       <div class="search"><input id="search-box" placeholder="Search films & TV shows…" value="${esc(state.search.q)}"></div>
       <div class="meta">
         <span class="region-badge" title="Streaming region (auto-detected)">${esc(region)}</span>
-        <button class="small ${state.tab === 'suggestions' ? 'active' : ''}" id="inbox-btn">
+        <button class="small ${state.tab === 'suggestions' ? 'active' : ''} ${state.suggestions.length ? 'glow' : ''}" id="inbox-btn">
           Inbox${state.suggestions.length ? `<span class="badge">${state.suggestions.length}</span>` : ''}</button>
         <span>${esc(user.name)}</span>
         <button class="small" id="logout">Sign out</button>
@@ -734,6 +734,7 @@ function renderSuggestions(main) {
           <div class="dim">${pn} has it as “${esc(s.status)}” · say yes and it joins Our list</div>
         </div>
         <button class="primary small" data-sadd="${s.tmdb_id}:${esc(s.media_type)}">Add to my list</button>
+        <button class="small" data-swatched="${s.tmdb_id}:${esc(s.media_type)}">✓ Watched</button>
         <button class="small danger" data-sdismiss="${s.tmdb_id}:${esc(s.media_type)}">Dismiss</button>
       </div>`).join('')}`;
   main.querySelectorAll('[data-sadd]').forEach((b) => {
@@ -742,6 +743,25 @@ function renderSuggestions(main) {
       const s = state.suggestions.find((x) => x.tmdb_id === Number(id) && x.media_type === mt);
       await api('/lists', { method: 'POST', body: {
         tmdbId: s.tmdb_id, mediaType: s.media_type, status: 'want',
+        title: s.title, poster: s.poster, year: s.year, tmdbRating: s.tmdb_rating,
+      }});
+      await syncLists();
+    };
+  });
+  main.querySelectorAll('[data-swatched]').forEach((b) => {
+    b.onclick = async () => {
+      const [id, mt] = b.dataset.swatched.split(':');
+      const s = state.suggestions.find((x) => x.tmdb_id === Number(id) && x.media_type === mt);
+      if (mt === 'tv') {
+        // Same season/episode prompt as everywhere else.
+        openEpisodePicker({
+          tmdbId: s.tmdb_id, mediaType: 'tv', title: s.title,
+          poster: s.poster, year: s.year, tmdbRating: s.tmdb_rating,
+        });
+        return;
+      }
+      await api('/lists', { method: 'POST', body: {
+        tmdbId: s.tmdb_id, mediaType: s.media_type, status: 'watched',
         title: s.title, poster: s.poster, year: s.year, tmdbRating: s.tmdb_rating,
       }});
       await syncLists();
