@@ -343,6 +343,8 @@ async function openEpisodePicker(item) {
     return;
   }
   const expanded = new Set();
+  const fmtFull = (d) =>
+    new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 
   const draw = () => {
     const modal = overlay.querySelector('.modal');
@@ -357,26 +359,51 @@ async function openEpisodePicker(item) {
         const mineEps = data.mine[s.season] || [];
         const theirEps = data.partner[s.season] || [];
         const allOn = mineEps.length >= s.episodes && s.episodes > 0;
+        const year = (s.airDate || '').slice(0, 4);
+        const epList = data.seasonEps?.[s.season];
         return `
           <div class="season">
             <button class="ep-toggle ${allOn ? 'on' : (mineEps.length ? 'half' : '')}" data-season="${s.season}" data-eps="${s.episodes}">
               ${allOn ? '✓' : '+'}</button>
-            <span class="season-name">${esc(s.name)}</span>
-            <span class="dim">${mineEps.length}/${s.episodes}${theirEps.length && data.partnerName ? ` · ${esc(data.partnerName)}: ${theirEps.length}` : ''}</span>
+            <div class="ep-info">
+              <div><span class="season-name">${esc(s.name)}</span>
+                <span class="dim">${year ? `${year} · ` : ''}${mineEps.length}/${s.episodes}${theirEps.length && data.partnerName ? ` · ${esc(data.partnerName)}: ${theirEps.length}` : ''}</span></div>
+              ${s.overview ? `<div class="dim ep-ov">${esc(s.overview)}</div>` : ''}
+            </div>
             <button class="small" data-expand="${s.season}">${expanded.has(s.season) ? 'Hide' : 'Episodes'}</button>
           </div>
-          ${expanded.has(s.season) ? `<div class="eps">
+          ${expanded.has(s.season) ? (epList?.length ? `<div class="eps-list">
+            ${epList.map((ep) => `
+              <div class="ep-row">
+                <button class="ep-toggle ${mineEps.includes(ep.episode) ? 'on' : ''}" data-ep="${s.season}:${ep.episode}">${ep.episode}</button>
+                <div class="ep-info">
+                  <div>${esc(ep.name || `Episode ${ep.episode}`)}
+                    <span class="dim">${ep.runtime ? `${ep.runtime} min` : ''}${ep.airDate ? `${ep.runtime ? ' · ' : ''}${fmtFull(ep.airDate)}` : ''}</span></div>
+                  ${ep.overview ? `<div class="dim ep-ov">${esc(ep.overview)}</div>` : ''}
+                </div>
+              </div>`).join('')}
+          </div>` : `<div class="dim" style="margin:6px 0 12px 42px">${epList ? `<div class="eps">
             ${Array.from({ length: s.episodes }, (_, i) => i + 1).map((e) =>
               `<button class="ep-toggle ${mineEps.includes(e) ? 'on' : ''}" data-ep="${s.season}:${e}">${e}</button>`).join('')}
-          </div>` : ''}`;
+          </div>` : 'Loading episode details…'}</div>`) : ''}`;
       }).join('')}`;
 
     modal.querySelector('.close').onclick = async () => { closeModal(); await syncLists(); };
     modal.querySelectorAll('[data-expand]').forEach((b) => {
-      b.onclick = () => {
+      b.onclick = async () => {
         const s = Number(b.dataset.expand);
-        expanded.has(s) ? expanded.delete(s) : expanded.add(s);
+        if (expanded.has(s)) { expanded.delete(s); draw(); return; }
+        expanded.add(s);
         draw();
+        data.seasonEps = data.seasonEps || {};
+        if (!data.seasonEps[s]) {
+          try {
+            data.seasonEps[s] = (await api(`/episodes/${item.tmdbId}/season/${s}`)).episodes;
+          } catch {
+            data.seasonEps[s] = []; // falls back to plain number buttons
+          }
+          draw();
+        }
       };
     });
     const meta = {

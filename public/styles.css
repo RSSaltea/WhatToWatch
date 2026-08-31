@@ -153,9 +153,13 @@ main { padding: 18px; max-width: 1100px; margin: 0 auto; }
 .qbtn.half { border-color: var(--good); color: var(--good); }
 
 /* ---- episode picker */
-.season { display: flex; align-items: center; gap: 10px; margin: 10px 0 4px; }
+.season { display: flex; align-items: flex-start; gap: 10px; margin: 12px 0 4px; }
 .season .season-name { font-weight: 600; }
-.season .small { margin-left: auto; }
+.season .small { margin-left: auto; flex-shrink: 0; }
+.ep-info { flex: 1; min-width: 0; }
+.ep-ov { font-size: 12px; margin-top: 2px; }
+.eps-list { margin: 6px 0 14px 0; border-left: 2px solid var(--border); padding-left: 12px; }
+.ep-row { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; }
 .eps { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px 42px; }
 .ep-toggle {
   min-width: 34px; height: 30px; padding: 0 6px; border-radius: 7px;

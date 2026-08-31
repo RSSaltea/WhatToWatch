@@ -611,6 +611,20 @@ export async function onRequest(context) {
     }
 
     // ----- per-episode tracking for TV shows
+    const epSeason = path.match(/^\/episodes\/(\d+)\/season\/(\d+)$/);
+    if (epSeason && method === 'GET') {
+      const data = await tmdb(env, `/tv/${epSeason[1]}/season/${epSeason[2]}`);
+      return json({
+        episodes: (data.episodes || []).map((e) => ({
+          episode: e.episode_number,
+          name: e.name,
+          airDate: e.air_date,
+          runtime: e.runtime,
+          overview: e.overview,
+        })),
+      });
+    }
+
     const epGet = path.match(/^\/episodes\/(\d+)$/);
     if (epGet && method === 'GET') {
       const id = Number(epGet[1]);
@@ -620,7 +634,13 @@ export async function onRequest(context) {
       ]);
       const seasons = (details.seasons || [])
         .filter((s) => s.season_number > 0)
-        .map((s) => ({ season: s.season_number, name: s.name, episodes: s.episode_count }));
+        .map((s) => ({
+          season: s.season_number,
+          name: s.name,
+          episodes: s.episode_count,
+          airDate: s.air_date,
+          overview: s.overview,
+        }));
       const totalEpisodes = seasons.reduce((a, s) => a + s.episodes, 0);
       const { results } = await env.DB.prepare(
         'SELECT user_id, season, episode FROM episode_watches WHERE tmdb_id = ? AND user_id IN (?, ?)'
