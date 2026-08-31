@@ -153,11 +153,21 @@ async function runSearch() {
 }
 
 function posterCard(item, extraSub = '') {
+  const mt = item.mediaType || item.media_type;
+  const id = item.tmdbId || item.tmdb_id;
+  const onList = state.lists.some((l) => l.tmdb_id === id && l.media_type === mt);
+  const payload = encodeURIComponent(JSON.stringify({
+    tmdbId: id, mediaType: mt, title: item.title, poster: item.poster,
+    year: item.year || '', tmdbRating: item.tmdbRating ?? null,
+  }));
   const img = item.poster
     ? `<img src="${esc(item.poster)}" alt="" loading="lazy">`
     : `<div class="noposter">${esc(item.title)}</div>`;
   return `
-    <div class="card" data-open="${item.mediaType || item.media_type}:${item.tmdbId || item.tmdb_id}" data-list-id="${item.id || ''}">
+    <div class="card" data-open="${mt}:${id}">
+      ${onList
+        ? '<span class="qadd done" title="Already on a list">✓</span>'
+        : `<button class="qadd" data-qadd="${payload}" title="Add to Our list → Want to watch">+</button>`}
       ${img}
       <div class="info">
         <div class="title">${esc(item.title)}</div>
@@ -211,6 +221,27 @@ function wireCards(root) {
     el.onclick = () => {
       const [mediaType, id] = el.dataset.open.split(':');
       openTitle(mediaType, Number(id));
+    };
+  });
+  root.querySelectorAll('[data-qadd]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const item = JSON.parse(decodeURIComponent(b.dataset.qadd));
+      b.disabled = true;
+      b.textContent = '…';
+      try {
+        await api('/lists', { method: 'POST', body: { ...item, scope: 'shared', status: 'want' } });
+        b.textContent = '✓';
+        b.classList.add('done');
+        b.title = 'Added to Our list';
+        state.tonight = null; // picks changed; recompute on next visit
+        const { items } = await api('/lists');
+        state.lists = items;
+      } catch (err2) {
+        b.textContent = '+';
+        b.disabled = false;
+        alert(err2.message);
+      }
     };
   });
 }
