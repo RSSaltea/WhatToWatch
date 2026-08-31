@@ -100,14 +100,13 @@ function ownerKeyFor(tab) {
 function render() {
   if (!state.me) return renderAuth();
   const { user, partner, region } = state.me;
-  const inboxCount = state.scrobbles.length + state.suggestions.length;
   const tabs = [
     ['tonight', 'Tonight'],
     ['discover', 'Discover'],
     ['shared', 'Our list'],
     ['mine', 'My list'],
     ['partner', partner ? `${esc(partner.name)}'s list` : 'Partner'],
-    ['inbox', `Inbox${inboxCount ? `<span class="badge">${inboxCount}</span>` : ''}`],
+    ['inbox', `TV activity${state.scrobbles.length ? `<span class="badge">${state.scrobbles.length}</span>` : ''}`],
   ];
   $app.innerHTML = `
     <header>
@@ -115,6 +114,8 @@ function render() {
       <div class="search"><input id="search-box" placeholder="Search films & TV shows…" value="${esc(state.search.q)}"></div>
       <div class="meta">
         <span class="region-badge" title="Streaming region (auto-detected)">${esc(region)}</span>
+        <button class="small ${state.tab === 'suggestions' ? 'active' : ''}" id="inbox-btn">
+          Inbox${state.suggestions.length ? `<span class="badge">${state.suggestions.length}</span>` : ''}</button>
         <span>${esc(user.name)}</span>
         <button class="small" id="logout">Sign out</button>
       </div>
@@ -125,6 +126,11 @@ function render() {
     </nav>
     <main id="main"></main>`;
 
+  document.getElementById('inbox-btn').onclick = () => {
+    state.tab = 'suggestions';
+    state.search.results = null;
+    render();
+  };
   document.getElementById('logout').onclick = async () => {
     await api('/auth/logout', { method: 'POST' });
     state.me = null;
@@ -206,6 +212,7 @@ function renderMain() {
   }
 
   if (state.tab === 'inbox') return renderInbox(main);
+  if (state.tab === 'suggestions') return renderSuggestions(main);
   if (state.tab === 'tonight') return renderTonight(main);
   if (state.tab === 'discover') return renderDiscover(main);
 
@@ -594,9 +601,14 @@ function fmtPosition(ms) {
   return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m in` : `${m}m in`;
 }
 
-function renderInbox(main) {
+function renderSuggestions(main) {
   const pn = esc(state.partnerName || 'Your partner');
-  const suggestionsHtml = state.suggestions.length ? `
+  if (!state.suggestions.length) {
+    main.innerHTML = `<div class="empty">Inbox empty.<br>
+      <span style="font-size:13px">When ${pn} adds something you don't have, it shows up here to add or dismiss.</span></div>`;
+    return;
+  }
+  main.innerHTML = `
     <div class="section-title">${pn} added these — want them too?</div>
     ${state.suggestions.map((s) => `
       <div class="scrobble">
@@ -607,27 +619,7 @@ function renderInbox(main) {
         </div>
         <button class="primary small" data-sadd="${s.tmdb_id}:${esc(s.media_type)}">Add to my list</button>
         <button class="small danger" data-sdismiss="${s.tmdb_id}:${esc(s.media_type)}">Dismiss</button>
-      </div>`).join('')}` : '';
-
-  if (!state.scrobbles.length && !state.suggestions.length) {
-    main.innerHTML = `<div class="empty">Nothing needs your attention.<br>
-      <span style="font-size:13px">TV activity and ${pn}'s additions land here.</span></div>`;
-    return;
-  }
-  main.innerHTML = `
-    ${suggestionsHtml}
-    ${state.scrobbles.length ? `<div class="section-title">Spotted on the TV — who was watching?</div>` : ''}
-    ${state.scrobbles.map((s) => `
-      <div class="scrobble">
-        <div class="what">
-          <div class="app-name">${esc(APP_NAMES[s.app] || s.app)}</div>
-          <div class="title">${esc(s.title || 'Unknown title')}</div>
-          <div class="dim">${esc(s.state)} · ${fmtPosition(s.position_ms)} · ${esc(s.last_seen)} UTC</div>
-        </div>
-        <button class="primary small" data-match="${s.id}">Log it</button>
-        <button class="small danger" data-dismiss="${s.id}">Dismiss</button>
       </div>`).join('')}`;
-
   main.querySelectorAll('[data-sadd]').forEach((b) => {
     b.onclick = async () => {
       const [id, mt] = b.dataset.sadd.split(':');
@@ -646,6 +638,27 @@ function renderInbox(main) {
       await syncLists();
     };
   });
+}
+
+function renderInbox(main) {
+  if (!state.scrobbles.length) {
+    main.innerHTML = `<div class="empty">No unlogged TV activity.<br>
+      <span style="font-size:13px">When the Fire TV plays something, it shows up here to be logged with one tap.</span></div>`;
+    return;
+  }
+  main.innerHTML = `
+    <div class="section-title">Spotted on the TV — who was watching?</div>
+    ${state.scrobbles.map((s) => `
+      <div class="scrobble">
+        <div class="what">
+          <div class="app-name">${esc(APP_NAMES[s.app] || s.app)}</div>
+          <div class="title">${esc(s.title || 'Unknown title')}</div>
+          <div class="dim">${esc(s.state)} · ${fmtPosition(s.position_ms)} · ${esc(s.last_seen)} UTC</div>
+        </div>
+        <button class="primary small" data-match="${s.id}">Log it</button>
+        <button class="small danger" data-dismiss="${s.id}">Dismiss</button>
+      </div>`).join('')}`;
+
   main.querySelectorAll('[data-dismiss]').forEach((b) => {
     b.onclick = async () => {
       await api(`/scrobbles/${b.dataset.dismiss}`, { method: 'POST', body: { action: 'dismiss' } });
