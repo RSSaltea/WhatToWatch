@@ -12,6 +12,7 @@ const state = {
   tonight: null,
   tonightScope: 'us',
   newEps: null,
+  newEpsOpen: false,
   discover: null,
   typeFilter: 'all', // all | movie | tv — shared across tabs
   search: { q: '', results: null },
@@ -496,8 +497,14 @@ async function loadNewEpisodes() {
   const { newEpisodes, upcoming } = state.newEps;
   const pn = state.me.partner ? esc(state.me.partner.name) : null;
   const fmtDate = (d) => d ? new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
+  if (!newEpisodes.length && !upcoming.length) { el.innerHTML = ''; return; }
   el.innerHTML = `
-    ${newEpisodes.length ? `<div class="section-title">🆕 New episodes out</div>
+    <div class="section-title collapser" id="neweps-toggle">
+      <span class="chev">${state.newEpsOpen ? '▾' : '▸'}</span> 🆕 New episodes out
+      ${newEpisodes.length ? `<span class="badge">${newEpisodes.length}</span>` : ''}
+    </div>
+    <div id="neweps-body" ${state.newEpsOpen ? '' : 'hidden'}>
+    ${newEpisodes.length ? `
       ${newEpisodes.map((e) => {
         const behind = [!e.meSeen && 'you', pn && !e.partnerSeen && pn].filter(Boolean).join(' and ');
         const payload = encodeURIComponent(JSON.stringify(e));
@@ -514,7 +521,12 @@ async function loadNewEpisodes() {
       }).join('')}` : ''}
     ${upcoming.length ? `<div class="section-title">Coming soon</div>
       <div style="margin-bottom:14px">${upcoming.map((u) =>
-        `<div class="dim" style="margin:4px 0">${esc(u.title)} — S${u.season} E${u.episode} lands ${fmtDate(u.airDate)}</div>`).join('')}</div>` : ''}`;
+        `<div class="dim" style="margin:4px 0">${esc(u.title)} — S${u.season} E${u.episode} lands ${fmtDate(u.airDate)}</div>`).join('')}</div>` : ''}
+    </div>`;
+  document.getElementById('neweps-toggle').onclick = () => {
+    state.newEpsOpen = !state.newEpsOpen;
+    loadNewEpisodes();
+  };
   el.querySelectorAll('[data-seen]').forEach((b) => {
     b.onclick = async () => {
       const e = JSON.parse(decodeURIComponent(b.dataset.seen));

@@ -120,6 +120,9 @@ nav.tabs button { border-radius: 999px; }
 main { padding: 18px; max-width: 1100px; margin: 0 auto; }
 
 .section-title { color: var(--text-dim); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; margin: 22px 0 10px; }
+.collapser { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+.collapser:hover { color: var(--text); }
+.collapser .chev { font-size: 11px; }
 .empty { color: var(--text-dim); padding: 30px 0; text-align: center; }
 
 /* ---- poster grid */
