@@ -140,7 +140,9 @@ main { padding: 18px; max-width: 1100px; margin: 0 auto; }
   transition: transform .1s;
 }
 .card:hover { transform: translateY(-2px); border-color: var(--text-dim); }
-.card { position: relative; }
+.card { position: relative; transition: opacity .25s ease, transform .25s ease; }
+.card.card-out { opacity: 0; transform: scale(.85); pointer-events: none; }
+.card.card-in { opacity: 0; transform: scale(.85); }
 .qbtns { position: absolute; top: 6px; right: 6px; z-index: 2; display: flex; gap: 5px; }
 .qbtn {
   width: 30px; height: 30px; padding: 0; border-radius: 999px;

@@ -372,7 +372,7 @@ export async function onRequest(context) {
         top: picks[0] || null,
         continueWatching: picks.filter((p) => p.status === 'watching').slice(0, 8),
         startSomething: picks.filter((p) => p.status === 'want').slice(0, 8),
-        fresh: fresh.slice(0, 6),
+        fresh: fresh.slice(0, 14),
       });
     }
 
@@ -404,7 +404,7 @@ export async function onRequest(context) {
         .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path &&
           !inLists.has(`${r.media_type}:${r.id}`))
         .sort(() => Math.random() - 0.5)
-        .slice(0, 18)
+        .slice(0, 30)
         .map(mapSearchResult);
 
       // Merge recommendations, scoring repeats across seeds higher.
@@ -426,7 +426,7 @@ export async function onRequest(context) {
       const suggested = [...scored.values()]
         .map((s) => ({ ...s, jitter: s.score + Math.random() * 1.5 }))
         .sort((a, b) => b.jitter - a.jitter)
-        .slice(0, 18)
+        .slice(0, 30)
         .map(({ score, jitter, ...s }) => s);
 
       return json({ trending, suggested });

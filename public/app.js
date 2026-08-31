@@ -15,6 +15,7 @@ const state = {
   newEpsOpen: false,
   discover: null,
   typeFilter: 'all', // all | movie | tv — shared across tabs
+  pools: {},         // backfillable grids: displayed items + spares
   search: { q: '', results: null },
   authMode: 'login',
   authError: '',
@@ -326,7 +327,7 @@ function renderMain() {
         const group = items.filter((i) => i.status === status);
         if (!group.length) return '';
         return `<div class="section-title">${label}</div>
-          <div class="grid">${group.map((i) =>
+          <div class="grid" data-section="${status}">${group.map((i) =>
             posterCard({ ...i, mediaType: i.media_type, tmdbId: i.tmdb_id },
               i.rating ? `★ ${i.rating}` : '')).join('')}</div>`;
       }).join('')
@@ -347,11 +348,12 @@ function wireCards(root) {
       e.stopPropagation();
       const item = JSON.parse(decodeURIComponent(b.dataset.qwant));
       const mine = myRow(item.mediaType, item.tmdbId);
+      const removing = mine && mine.status === 'want';
       b.disabled = true;
       try {
-        if (mine && mine.status === 'want') await api(`/lists/${mine.id}`, { method: 'DELETE' });
+        if (removing) await api(`/lists/${mine.id}`, { method: 'DELETE' });
         else await api('/lists', { method: 'POST', body: { ...item, status: 'want' } });
-        await syncLists();
+        await afterQuickAction(b, item, removing ? null : 'want');
       } catch (err2) { b.disabled = false; alert(err2.message); }
     };
   });
@@ -361,11 +363,12 @@ function wireCards(root) {
       const item = JSON.parse(decodeURIComponent(b.dataset.qwatch));
       if (item.mediaType === 'tv') return openEpisodePicker(item);
       const mine = myRow(item.mediaType, item.tmdbId);
+      const removing = mine && mine.status === 'watched';
       b.disabled = true;
       try {
-        if (mine && mine.status === 'watched') await api(`/lists/${mine.id}`, { method: 'DELETE' });
+        if (removing) await api(`/lists/${mine.id}`, { method: 'DELETE' });
         else await api('/lists', { method: 'POST', body: { ...item, status: 'watched' } });
-        await syncLists();
+        await afterQuickAction(b, item, removing ? null : 'watched');
       } catch (err2) { b.disabled = false; alert(err2.message); }
     };
   });
@@ -508,6 +511,8 @@ async function renderTonight(main) {
   const cont = flt(t.continueWatching);
   const start = flt(t.startSomething);
   const freshF = flt(t.fresh);
+  state.pools = { ...state.pools,
+    't-fresh': { items: freshF.slice(0, 6), spares: freshF.slice(6), sub: becauseTag } };
   const top = (t.top && matchesType(t.top.media_type)) ? t.top : (cont[0] || start[0] || null);
   const hero = top ? `
     <div class="hero" data-open="${top.media_type}:${top.tmdb_id}">
@@ -532,12 +537,12 @@ async function renderTonight(main) {
     ${hero}
     <div id="new-eps"></div>
     ${cont.length ? `<div class="section-title">Continue watching</div>
-      <div class="grid">${cont.map(asCard).join('')}</div>` : ''}
+      <div class="grid" data-section="watching">${cont.map(asCard).join('')}</div>` : ''}
     ${start.length ? `<div class="section-title">Start something</div>
-      <div class="grid">${start.map(asCard).join('')}</div>` : ''}
+      <div class="grid" data-section="want">${start.map(asCard).join('')}</div>` : ''}
     ${freshF.length ? `<div class="section-title">Or try something new</div>
-      <div class="grid">${freshF.map((r) => posterCard(r,
-        `<span title="Because you watched ${esc(r.because)}">↖ ${esc(r.because.length > 14 ? r.because.slice(0, 13) + '…' : r.because)}</span>`)).join('')}</div>` : ''}`;
+      <div class="grid" data-pool="t-fresh">${state.pools['t-fresh'].items.map((r) =>
+        posterCard(r, becauseTag(r))).join('')}</div>` : ''}`;
   main.querySelectorAll('[data-tscope]').forEach((b) => {
     b.onclick = () => {
       state.tonightScope = b.dataset.tscope;
@@ -628,14 +633,20 @@ async function renderDiscover(main) {
     return renderDiscover(document.getElementById('main'));
   }
   const d = state.discover;
+  const starTag = (r) => r.tmdbRating ? `★ ${r.tmdbRating}` : '';
+  state.pools = { ...state.pools,
+    'd-suggested': { items: d.suggested.slice(0, 18), spares: d.suggested.slice(18), sub: becauseTag },
+    'd-trending': { items: d.trending.slice(0, 18), spares: d.trending.slice(18), sub: starTag },
+  };
   main.innerHTML = `
     <div class="tonight-bar">${typeBar()}<button id="d-shuffle" class="small">🎲 Shuffle</button></div>
     ${d.suggested.length ? `<div class="section-title">Suggested for you</div>
-      <div class="grid">${d.suggested.map((r) =>
-        posterCard(r, r.because ? `<span title="Because you added ${esc(r.because)}">↖ ${esc(r.because.length > 14 ? r.because.slice(0, 13) + '…' : r.because)}</span>` : '')).join('')}</div>`
+      <div class="grid" data-pool="d-suggested">${state.pools['d-suggested'].items.map((r) =>
+        posterCard(r, becauseTag(r))).join('')}</div>`
       : '<div class="empty">Add a few things to your lists and suggestions appear here.</div>'}
     <div class="section-title">Trending</div>
-    <div class="grid">${d.trending.map((r) => posterCard(r, r.tmdbRating ? `★ ${r.tmdbRating}` : '')).join('')}</div>`;
+    <div class="grid" data-pool="d-trending">${state.pools['d-trending'].items.map((r) =>
+      posterCard(r, starTag(r))).join('')}</div>`;
   main.querySelector('#d-shuffle').onclick = () => { state.discover = null; renderMain(); };
   wireTypeBar(main);
   wireCards(main);
@@ -957,13 +968,66 @@ async function refresh() {
   render();
 }
 
-// Quietly refresh list state after a quick action, then re-render the
-// current view from its cached data (no full refetch, no tab reset).
-async function syncLists() {
+// Quietly refresh list state without touching the DOM.
+async function fetchListsQuiet() {
   const [lists, sugg] = await Promise.all([api('/lists'), api('/suggestions')]);
   state.lists = lists.items;
   state.suggestions = sugg.suggestions;
-  state.tonight = null;
+  state.tonight = null; // picks are stale; recomputed on next visit
+}
+
+// Quietly refresh list state after a quick action, then re-render the
+// current view from its cached data (no full refetch, no tab reset).
+async function syncLists() {
+  await fetchListsQuiet();
+  renderMain();
+}
+
+const becauseTag = (r) => r.because
+  ? `<span title="Because you watched ${esc(r.because)}">↖ ${esc(r.because.length > 14 ? r.because.slice(0, 13) + '…' : r.because)}</span>`
+  : '';
+
+// Fade a card out of its slot; in a backfillable grid, slide a spare in.
+function animateReplace(card, pool, removedKey) {
+  card.classList.add('card-out');
+  setTimeout(() => {
+    const p = state.pools?.[pool];
+    let spare = null;
+    if (p) {
+      p.items = p.items.filter((x) =>
+        `${x.mediaType || x.media_type}:${x.tmdbId || x.tmdb_id}` !== removedKey);
+      spare = p.spares.shift() || null;
+      if (spare) p.items.push(spare);
+    }
+    const grid = card.parentElement;
+    if (spare && grid) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = posterCard(spare, p.sub ? p.sub(spare) : '');
+      const el = tmp.firstElementChild;
+      el.classList.add('card-in');
+      card.replaceWith(el);
+      wireCards(grid);
+      requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('card-in')));
+    } else {
+      card.remove();
+    }
+  }, 250);
+}
+
+// After a quick +/✓: leave the page alone, just fix up the affected slot.
+async function afterQuickAction(btn, item, newStatus) {
+  await fetchListsQuiet();
+  const card = btn.closest('.card');
+  const grid = card?.closest('[data-pool],[data-section]');
+  if (grid?.dataset.pool && newStatus) {
+    animateReplace(card, grid.dataset.pool, `${item.mediaType}:${item.tmdbId}`);
+    return;
+  }
+  if (grid?.dataset.section && grid.dataset.section !== newStatus) {
+    card.classList.add('card-out');
+    setTimeout(() => card.remove(), 250);
+    return;
+  }
   renderMain();
 }
 
