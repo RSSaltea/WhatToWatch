@@ -710,6 +710,7 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
           ? `TV · ${t.seasons || '?'} season${t.seasons === 1 ? '' : 's'}${t.episodes ? ` · ${t.episodes} eps` : ''}`
           : `Film${t.runtime ? ` · ${t.runtime} min` : ''}`}
           ${t.genres.length ? ' · ' + esc(t.genres.slice(0, 3).join(', ')) : ''}</div>
+        ${t.makers?.length ? `<div class="dim">${t.mediaType === 'movie' ? 'Directed by' : 'Created by'} ${esc(t.makers.slice(0, 3).join(', '))}</div>` : ''}
         <div class="ratings">
           ${t.ratings.rottenTomatoes ? `<span class="rating">🍅 <b>${esc(t.ratings.rottenTomatoes)}</b></span>` : ''}
           ${t.ratings.imdb ? `<span class="rating">IMDb <b>${esc(t.ratings.imdb)}</b></span>` : ''}
@@ -718,6 +719,13 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
       </div>
     </div>
     <p class="overview">${esc(t.overview || '')}</p>
+    ${t.cast?.length ? `<div class="controls-label">Cast</div>
+      <div class="cast">${t.cast.map((c) => `
+        <div class="person" title="${esc(c.name)}${c.character ? ` as ${esc(c.character)}` : ''}">
+          ${c.photo ? `<img src="${esc(c.photo)}" alt="" loading="lazy">` : '<div class="nophoto">🎭</div>'}
+          <div>${esc(c.name)}</div>
+          ${c.character ? `<div class="char">${esc(c.character)}</div>` : ''}
+        </div>`).join('')}</div>` : ''}
     <div class="providers">
       <div class="controls-label">Where to watch (${esc(t.region)})</div>
       ${provRow('Stream', t.providers.stream) + provRow('Rent', t.providers.rent) + provRow('Buy', t.providers.buy)

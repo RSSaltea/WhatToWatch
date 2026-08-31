@@ -237,6 +237,16 @@ main { padding: 18px; max-width: 1100px; margin: 0 auto; }
 .hero p { margin: 4px 0; }
 .hero:hover { border-color: var(--text); }
 
+/* ---- cast strip */
+.cast { display: flex; gap: 12px; overflow-x: auto; padding: 8px 0 10px; }
+.cast .person { width: 78px; flex-shrink: 0; text-align: center; font-size: 12px; line-height: 1.25; }
+.cast img, .cast .nophoto {
+  width: 62px; height: 62px; border-radius: 50%; object-fit: cover;
+  margin: 0 auto 5px; display: flex; align-items: center; justify-content: center;
+  background: var(--surface-2); font-size: 24px;
+}
+.cast .char { color: var(--text-dim); font-size: 11px; }
+
 /* ---- similar titles strip */
 .similar { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; }
 .similar img { width: 72px; border-radius: 6px; cursor: pointer; flex-shrink: 0; }

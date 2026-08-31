@@ -401,7 +401,8 @@ export async function onRequest(context) {
 
       const trending = (trendingData.results || [])
         .map((r) => ({ ...r, media_type: r.media_type || dType }))
-        .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path)
+        .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path &&
+          !inLists.has(`${r.media_type}:${r.id}`))
         .sort(() => Math.random() - 0.5)
         .slice(0, 18)
         .map(mapSearchResult);
@@ -435,7 +436,7 @@ export async function onRequest(context) {
     if (titleMatch) {
       const [, mediaType, id] = titleMatch;
       const details = await tmdb(env, `/${mediaType}/${id}`, {
-        append_to_response: 'external_ids,watch/providers,recommendations',
+        append_to_response: 'external_ids,watch/providers,recommendations,credits',
       });
       const [prices, omdb] = await Promise.all([
         fetchPrices(env, mediaType, id, region),
@@ -460,6 +461,14 @@ export async function onRequest(context) {
           imdb: omdb.imdbRating || null,
         },
         region,
+        cast: (details.credits?.cast || []).slice(0, 10).map((c) => ({
+          name: c.name,
+          character: c.character,
+          photo: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : null,
+        })),
+        makers: mediaType === 'movie'
+          ? (details.credits?.crew || []).filter((c) => c.job === 'Director').map((c) => c.name)
+          : (details.created_by || []).map((c) => c.name),
         similar: (details.recommendations?.results || [])
           .filter((r) => r.poster_path)
           .slice(0, 10)
