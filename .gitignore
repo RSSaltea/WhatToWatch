@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.dev.vars
+
+# Android
+tv-scrobbler/.gradle/
+tv-scrobbler/build/
+tv-scrobbler/app/build/
+tv-scrobbler/local.properties
+tv-scrobbler/.idea/
+*.apk
