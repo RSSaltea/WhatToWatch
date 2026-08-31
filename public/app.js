@@ -17,6 +17,8 @@ const state = {
   typeFilter: 'all', // all | movie | tv — shared across tabs
   pools: {},         // backfillable grids: displayed items + spares
   niOpen: false,     // "not interested" section on Discover
+  ourGroup: 'towatch',   // Our list view: towatch | watched | split
+  statusFilter: 'all',   // personal list tabs: all | want | watching | watched
   search: { q: '', results: null },
   authMode: 'login',
   authError: '',
@@ -186,6 +188,8 @@ let suppressHash = false;
 function updateHash() {
   let h = '#/' + (TAB_SLUGS[state.tab] || 'tonight');
   if (state.tab === 'tonight') h += '/' + state.tonightScope;
+  if (state.tab === 'shared') h += '/' + state.ourGroup;
+  if (state.tab === 'mine' || state.tab === 'partner') h += '/' + state.statusFilter;
   if (!['inbox', 'suggestions'].includes(state.tab)) h += '/' + TYPE_SLUGS[state.typeFilter];
   if (location.hash !== h) {
     suppressHash = true;
@@ -201,6 +205,15 @@ function applyHash() {
   let i = 1;
   if (tab === 'tonight' && ['us', 'me'].includes(parts[1])) {
     state.tonightScope = parts[1];
+    i = 2;
+  }
+  if (tab === 'shared' && ['towatch', 'watched', 'split'].includes(parts[1])) {
+    state.ourGroup = parts[1];
+    i = 2;
+  }
+  if ((tab === 'mine' || tab === 'partner') &&
+      ['all', 'want', 'watching', 'watched'].includes(parts[1])) {
+    state.statusFilter = parts[1];
     i = 2;
   }
   if (SLUG_TYPES[parts[i]]) state.typeFilter = SLUG_TYPES[parts[i]];
@@ -291,49 +304,95 @@ function renderMain() {
   if (state.tab === 'tonight') return renderTonight(main);
   if (state.tab === 'discover') return renderDiscover(main);
 
-  let items;
+  const sectionGrid = (group, status, sub = null) => `
+    <div class="grid" data-section="${status}">${group.map((i) =>
+      posterCard({ ...i, mediaType: i.media_type, tmdbId: i.tmdb_id },
+        sub ? sub(i) : (i.rating ? `★ ${i.rating}` : ''))).join('')}</div>`;
+
   if (state.tab === 'shared') {
     // Our list is derived: only titles on BOTH personal lists appear.
     if (!state.me.partner) {
       main.innerHTML = '<div class="empty">Your partner hasn\'t made their account yet.</div>';
       return;
     }
-    const pKey = `u${state.me.partner.id}`;
-    const theirs = new Map(state.lists.filter((i) => i.owner_key === pKey)
+    const theirs = new Map(state.lists.filter((i) => i.owner_key === `u${state.me.partner.id}`)
       .map((i) => [`${i.media_type}:${i.tmdb_id}`, i]));
-    items = state.lists
+    let pairs = state.lists
       .filter((i) => i.owner_key === `u${state.me.user.id}`)
       .map((m) => {
         const o = theirs.get(`${m.media_type}:${m.tmdb_id}`);
-        if (!o) return null;
-        const status = (m.status === 'watched' && o.status === 'watched') ? 'watched'
-          : (m.status === 'watching' || o.status === 'watching') ? 'watching' : 'want';
-        return { ...m, status };
+        return o ? { m, o } : null;
       })
       .filter(Boolean);
-  } else {
-    const key = ownerKeyFor(state.tab);
-    if (!key) {
-      main.innerHTML = '<div class="empty">Your partner hasn\'t made their account yet.</div>';
-      return;
+    if (state.typeFilter !== 'all') pairs = pairs.filter((p) => p.m.media_type === state.typeFilter);
+
+    const groupBar = `<div class="scopes">${[
+      ['towatch', 'To watch together'],
+      ['watched', 'Watched together'],
+      ['split', 'One of us has seen it'],
+    ].map(([v, l]) =>
+      `<button data-ogroup="${v}" class="${state.ourGroup === v ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+
+    let body = '';
+    if (state.ourGroup === 'towatch') {
+      const both = pairs.filter((p) => p.m.status !== 'watched' && p.o.status !== 'watched');
+      const watching = both.filter((p) => p.m.status === 'watching' || p.o.status === 'watching')
+        .map((p) => ({ ...p.m, status: 'watching' }));
+      const want = both.filter((p) => p.m.status === 'want' && p.o.status === 'want')
+        .map((p) => ({ ...p.m, status: 'want' }));
+      body = (watching.length ? `<div class="section-title">Watching together</div>${sectionGrid(watching, 'watching')}` : '')
+        + (want.length ? `<div class="section-title">Want to watch</div>${sectionGrid(want, 'want')}` : '')
+        || '<div class="empty">Nothing you both want to watch yet — when you both add the same thing, it lands here.</div>';
+    } else if (state.ourGroup === 'watched') {
+      const done = pairs.filter((p) => p.m.status === 'watched' && p.o.status === 'watched')
+        .map((p) => ({ ...p.m, status: 'watched' }));
+      body = done.length ? sectionGrid(done, 'watched')
+        : '<div class="empty">Nothing you\'ve both finished yet.</div>';
+    } else {
+      const split = pairs.filter((p) => (p.m.status === 'watched') !== (p.o.status === 'watched'))
+        .map((p) => ({
+          ...p.m,
+          status: 'split',
+          seenBy: p.m.status === 'watched' ? state.me.user.name : state.me.partner.name,
+        }));
+      body = split.length
+        ? sectionGrid(split, 'split', (i) => `👁 ${esc(i.seenBy)}`)
+        : '<div class="empty">No mismatches — nothing here has been seen by only one of you.</div>';
     }
-    items = state.lists.filter((i) => i.owner_key === key);
+    main.innerHTML = `<div class="tonight-bar">${groupBar}${typeBar()}</div>${body}`;
+    main.querySelectorAll('[data-ogroup]').forEach((b) => {
+      b.onclick = () => { state.ourGroup = b.dataset.ogroup; renderMain(); };
+    });
+    wireTypeBar(main);
+    wireCards(main);
+    return;
   }
+
+  const key = ownerKeyFor(state.tab);
+  if (!key) {
+    main.innerHTML = '<div class="empty">Your partner hasn\'t made their account yet.</div>';
+    return;
+  }
+  let items = state.lists.filter((i) => i.owner_key === key);
   if (state.typeFilter !== 'all') items = items.filter((i) => i.media_type === state.typeFilter);
-  const sections = [['watching', 'Watching now'], ['want', 'Want to watch'], ['watched', 'Watched']];
-  const emptyMsg = state.tab === 'shared'
-    ? 'Nothing on both your lists yet — when you both add the same thing, it lands here automatically.'
-    : 'Nothing here yet — search above to add something.';
-  main.innerHTML = `<div class="tonight-bar">${typeBar()}</div>` + (items.length
+
+  const statusBar = `<div class="scopes">${[
+    ['all', 'All'], ['want', 'Want to watch'], ['watching', 'Watching'], ['watched', 'Watched'],
+  ].map(([v, l]) =>
+    `<button data-sfilter="${v}" class="${state.statusFilter === v ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+  const sections = [['watching', 'Watching now'], ['want', 'Want to watch'], ['watched', 'Watched']]
+    .filter(([status]) => state.statusFilter === 'all' || status === state.statusFilter);
+  const shown = items.filter((i) => state.statusFilter === 'all' || i.status === state.statusFilter);
+  main.innerHTML = `<div class="tonight-bar">${statusBar}${typeBar()}</div>` + (shown.length
     ? sections.map(([status, label]) => {
         const group = items.filter((i) => i.status === status);
         if (!group.length) return '';
-        return `<div class="section-title">${label}</div>
-          <div class="grid" data-section="${status}">${group.map((i) =>
-            posterCard({ ...i, mediaType: i.media_type, tmdbId: i.tmdb_id },
-              i.rating ? `★ ${i.rating}` : '')).join('')}</div>`;
+        return `<div class="section-title">${label}</div>${sectionGrid(group, status)}`;
       }).join('')
-    : `<div class="empty">${emptyMsg}</div>`);
+    : '<div class="empty">Nothing here yet — search above to add something.</div>');
+  main.querySelectorAll('[data-sfilter]').forEach((b) => {
+    b.onclick = () => { state.statusFilter = b.dataset.sfilter; renderMain(); };
+  });
   wireTypeBar(main);
   wireCards(main);
 }
