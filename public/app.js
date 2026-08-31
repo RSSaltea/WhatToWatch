@@ -107,7 +107,7 @@ function render() {
     ['shared', 'Our list'],
     ['mine', 'My list'],
     ['partner', partner ? `${esc(partner.name)}'s list` : 'Partner'],
-    ['inbox', `TV activity${inboxCount ? `<span class="badge">${inboxCount}</span>` : ''}`],
+    ['inbox', `Inbox${inboxCount ? `<span class="badge">${inboxCount}</span>` : ''}`],
   ];
   $app.innerHTML = `
     <header>
