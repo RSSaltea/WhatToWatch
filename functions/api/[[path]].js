@@ -288,6 +288,36 @@ export async function onRequest(context) {
       } else {
         candidates = mineRows.filter((r) => r.status !== 'watched');
       }
+
+      // Don't suggest continuing a show that's fully caught up — i.e. the
+      // last aired episode is already ticked by everyone in scope.
+      const tvWatching = candidates
+        .filter((c) => c.media_type === 'tv' && c.status === 'watching')
+        .slice(0, 15);
+      if (tvWatching.length) {
+        const uids = scope === 'us' && partnerRow ? [user.id, partnerRow.id] : [user.id];
+        const ids = tvWatching.map((c) => c.tmdb_id);
+        const [{ results: ws }, ...tvDetails] = await Promise.all([
+          env.DB.prepare(
+            `SELECT user_id, tmdb_id, season, episode FROM episode_watches
+             WHERE tmdb_id IN (${ids.map(() => '?').join(',')})
+             AND user_id IN (${uids.map(() => '?').join(',')})`
+          ).bind(...ids, ...uids).all(),
+          ...tvWatching.map((c) => tmdb(env, `/tv/${c.tmdb_id}`).catch(() => null)),
+        ]);
+        const seenEps = new Set(ws.map((r) => `${r.user_id}:${r.tmdb_id}:${r.season}:${r.episode}`));
+        const caughtUp = new Set();
+        tvDetails.forEach((d, i) => {
+          const last = d?.last_episode_to_air;
+          if (!last?.season_number) return;
+          const id = tvWatching[i].tmdb_id;
+          if (uids.every((u) => seenEps.has(`${u}:${id}:${last.season_number}:${last.episode_number}`))) {
+            caughtUp.add(id);
+          }
+        });
+        candidates = candidates.filter((c) => !(c.media_type === 'tv' && caughtUp.has(c.tmdb_id)));
+      }
+
       const now = Date.now();
       const picks = candidates.map((i) => {
         const days = Math.max(0, (now - Date.parse(i.updated_at.replace(' ', 'T') + 'Z')) / 86400000);
