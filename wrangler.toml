@@ -6,4 +6,4 @@ pages_build_output_dir = "public"
 [[d1_databases]]
 binding = "DB"
 database_name = "whattowatch"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "25245e52-7cf7-4774-982e-41461a3612e3"
