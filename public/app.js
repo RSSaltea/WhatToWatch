@@ -168,6 +168,50 @@ async function runSearch() {
   } catch { /* ignore stale searches */ }
 }
 
+// ---------------------------------------------------------------- routing
+// Every view has its own URL: #/{tab}[/{scope}][/{type}] — e.g. #/tonight/us/tv,
+// #/discover/films, #/mine/all — so refresh and back/forward keep your place.
+
+const TAB_SLUGS = {
+  tonight: 'tonight', discover: 'discover', shared: 'ours', mine: 'mine',
+  partner: 'partner', inbox: 'tv-activity', suggestions: 'inbox',
+};
+const SLUG_TABS = Object.fromEntries(Object.entries(TAB_SLUGS).map(([k, v]) => [v, k]));
+const TYPE_SLUGS = { all: 'all', movie: 'films', tv: 'tv' };
+const SLUG_TYPES = Object.fromEntries(Object.entries(TYPE_SLUGS).map(([k, v]) => [v, k]));
+let suppressHash = false;
+
+function updateHash() {
+  let h = '#/' + (TAB_SLUGS[state.tab] || 'tonight');
+  if (state.tab === 'tonight') h += '/' + state.tonightScope;
+  if (!['inbox', 'suggestions'].includes(state.tab)) h += '/' + TYPE_SLUGS[state.typeFilter];
+  if (location.hash !== h) {
+    suppressHash = true;
+    location.hash = h;
+  }
+}
+
+function applyHash() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  const tab = SLUG_TABS[parts[0]];
+  if (!tab) return;
+  state.tab = tab;
+  let i = 1;
+  if (tab === 'tonight' && ['us', 'me'].includes(parts[1])) {
+    state.tonightScope = parts[1];
+    i = 2;
+  }
+  if (SLUG_TYPES[parts[i]]) state.typeFilter = SLUG_TYPES[parts[i]];
+}
+
+window.addEventListener('hashchange', () => {
+  if (suppressHash) { suppressHash = false; return; }
+  if (!state.me) return;
+  applyHash();
+  state.tonight = null; // scope/filter may have changed
+  render();
+});
+
 const matchesType = (mt) => state.typeFilter === 'all' || mt === state.typeFilter;
 
 function typeBar() {
@@ -225,6 +269,7 @@ function posterCard(item, extraSub = '') {
 function renderMain() {
   const main = document.getElementById('main');
   if (!main) return;
+  updateHash();
 
   // Search results take over the main area when active.
   if (state.search.results) {
@@ -917,6 +962,7 @@ async function syncLists() {
 async function boot() {
   try {
     state.me = await api('/me');
+    applyHash(); // land on the tab/filter the URL names
     await refresh();
   } catch {
     renderAuth();
