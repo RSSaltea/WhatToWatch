@@ -39,5 +39,23 @@ CREATE TABLE IF NOT EXISTS scrobbles (
   last_seen TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-episode watch tracking for TV shows.
+CREATE TABLE IF NOT EXISTS episode_watches (
+  user_id INTEGER NOT NULL,
+  tmdb_id INTEGER NOT NULL,
+  season INTEGER NOT NULL,
+  episode INTEGER NOT NULL,
+  watched_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, tmdb_id, season, episode)
+);
+
+-- Partner suggestions the user chose not to copy to their own list.
+CREATE TABLE IF NOT EXISTS dismissed_suggestions (
+  user_id INTEGER NOT NULL,
+  tmdb_id INTEGER NOT NULL,
+  media_type TEXT NOT NULL,
+  PRIMARY KEY (user_id, tmdb_id, media_type)
+);
+
 CREATE INDEX IF NOT EXISTS idx_list_items_owner ON list_items (owner_key, status);
 CREATE INDEX IF NOT EXISTS idx_scrobbles_status ON scrobbles (status, last_seen);

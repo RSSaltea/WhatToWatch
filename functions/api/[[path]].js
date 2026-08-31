@@ -258,13 +258,31 @@ export async function onRequest(context) {
     // nightly jitter keeps the list fresh.
     if (path === '/tonight') {
       const scope = url.searchParams.get('scope') === 'me' ? 'me' : 'us';
-      const keys = scope === 'us' ? ['shared'] : ['shared', `u${user.id}`];
-      const { results } = await env.DB.prepare(
-        `SELECT * FROM list_items WHERE status IN ('want','watching')
-         AND owner_key IN (${keys.map(() => '?').join(',')})`
-      ).bind(...keys).all();
+      const partnerRow = await env.DB.prepare('SELECT id FROM users WHERE id != ?').bind(user.id).first();
+      const { results: rows } = await env.DB.prepare(
+        'SELECT * FROM list_items WHERE owner_key IN (?, ?)'
+      ).bind(`u${user.id}`, partnerRow ? `u${partnerRow.id}` : 'u-none').all();
+      const mineRows = rows.filter((r) => r.owner_key === `u${user.id}`);
+      let candidates;
+      if (scope === 'us' && partnerRow) {
+        // "For both of us" = titles on BOTH personal lists, neither finished.
+        const theirs = new Map(rows.filter((r) => r.owner_key === `u${partnerRow.id}`)
+          .map((r) => [`${r.media_type}:${r.tmdb_id}`, r]));
+        candidates = mineRows.map((m) => {
+          const o = theirs.get(`${m.media_type}:${m.tmdb_id}`);
+          if (!o || m.status === 'watched' || o.status === 'watched') return null;
+          return {
+            ...m,
+            status: (m.status === 'watching' || o.status === 'watching') ? 'watching' : 'want',
+            rating: m.rating || o.rating,
+            updated_at: m.updated_at > o.updated_at ? m.updated_at : o.updated_at,
+          };
+        }).filter(Boolean);
+      } else {
+        candidates = mineRows.filter((r) => r.status !== 'watched');
+      }
       const now = Date.now();
-      const picks = results.map((i) => {
+      const picks = candidates.map((i) => {
         const days = Math.max(0, (now - Date.parse(i.updated_at.replace(' ', 'T') + 'Z')) / 86400000);
         let score = 0;
         const why = [];
@@ -396,9 +414,9 @@ export async function onRequest(context) {
 
     if (path === '/lists' && method === 'POST') {
       const b = await request.json();
-      const ownerKey = b.scope === 'shared' ? 'shared'
-        : b.scope === 'partner' ? null : `u${user.id}`;
-      if (ownerKey === null) return err('bad scope');
+      // Adds always target the caller's own list; the shared "Our list" is
+      // derived — a title is on it only when both personal lists have it.
+      const ownerKey = `u${user.id}`;
       if (!b.tmdbId || !['movie', 'tv'].includes(b.mediaType) ||
           !['want', 'watching', 'watched'].includes(b.status) || !b.title) {
         return err('missing fields');
@@ -433,6 +451,100 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
+    // ----- partner suggestions (things on their list that aren't on yours)
+    if (path === '/suggestions' && method === 'GET') {
+      const p = await env.DB.prepare('SELECT id, name FROM users WHERE id != ?').bind(user.id).first();
+      if (!p) return json({ suggestions: [], partnerName: null });
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM list_items p WHERE p.owner_key = ?
+         AND NOT EXISTS (SELECT 1 FROM list_items m
+                         WHERE m.owner_key = ? AND m.tmdb_id = p.tmdb_id AND m.media_type = p.media_type)
+         AND NOT EXISTS (SELECT 1 FROM dismissed_suggestions d
+                         WHERE d.user_id = ? AND d.tmdb_id = p.tmdb_id AND d.media_type = p.media_type)
+         ORDER BY p.updated_at DESC LIMIT 30`
+      ).bind(`u${p.id}`, `u${user.id}`, user.id).all();
+      return json({ suggestions: results, partnerName: p.name });
+    }
+    if (path === '/suggestions' && method === 'POST') {
+      const b = await request.json();
+      if (!b.tmdbId || !b.mediaType) return err('missing fields');
+      await env.DB.prepare(
+        'INSERT OR IGNORE INTO dismissed_suggestions (user_id, tmdb_id, media_type) VALUES (?, ?, ?)'
+      ).bind(user.id, b.tmdbId, b.mediaType).run();
+      return json({ ok: true });
+    }
+
+    // ----- per-episode tracking for TV shows
+    const epGet = path.match(/^\/episodes\/(\d+)$/);
+    if (epGet && method === 'GET') {
+      const id = Number(epGet[1]);
+      const [details, p] = await Promise.all([
+        tmdb(env, `/tv/${id}`),
+        env.DB.prepare('SELECT id, name FROM users WHERE id != ?').bind(user.id).first(),
+      ]);
+      const seasons = (details.seasons || [])
+        .filter((s) => s.season_number > 0)
+        .map((s) => ({ season: s.season_number, name: s.name, episodes: s.episode_count }));
+      const totalEpisodes = seasons.reduce((a, s) => a + s.episodes, 0);
+      const { results } = await env.DB.prepare(
+        'SELECT user_id, season, episode FROM episode_watches WHERE tmdb_id = ? AND user_id IN (?, ?)'
+      ).bind(id, user.id, p?.id ?? -1).all();
+      const mine = {}, theirs = {};
+      for (const r of results) {
+        const bucket = r.user_id === user.id ? mine : theirs;
+        (bucket[r.season] = bucket[r.season] || []).push(r.episode);
+      }
+      return json({ seasons, totalEpisodes, mine, partner: theirs, partnerName: p?.name || null });
+    }
+
+    if (path === '/episodes' && method === 'POST') {
+      const b = await request.json();
+      if (!b.tmdbId || !b.season || typeof b.watched !== 'boolean') return err('missing fields');
+      if (b.episode) {
+        if (b.watched) {
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO episode_watches (user_id, tmdb_id, season, episode) VALUES (?, ?, ?, ?)'
+          ).bind(user.id, b.tmdbId, b.season, b.episode).run();
+        } else {
+          await env.DB.prepare(
+            'DELETE FROM episode_watches WHERE user_id = ? AND tmdb_id = ? AND season = ? AND episode = ?'
+          ).bind(user.id, b.tmdbId, b.season, b.episode).run();
+        }
+      } else if (b.watched) {
+        // Whole season on.
+        const stmts = [];
+        for (let e = 1; e <= (b.episodes || 0); e++) {
+          stmts.push(env.DB.prepare(
+            'INSERT OR IGNORE INTO episode_watches (user_id, tmdb_id, season, episode) VALUES (?, ?, ?, ?)'
+          ).bind(user.id, b.tmdbId, b.season, e));
+        }
+        if (stmts.length) await env.DB.batch(stmts);
+      } else {
+        await env.DB.prepare(
+          'DELETE FROM episode_watches WHERE user_id = ? AND tmdb_id = ? AND season = ?'
+        ).bind(user.id, b.tmdbId, b.season).run();
+      }
+      // Keep the show's list entry in sync with episode progress.
+      const { c } = await env.DB.prepare(
+        'SELECT COUNT(*) AS c FROM episode_watches WHERE user_id = ? AND tmdb_id = ?'
+      ).bind(user.id, b.tmdbId).first();
+      if (c === 0) {
+        await env.DB.prepare(
+          "DELETE FROM list_items WHERE owner_key = ? AND tmdb_id = ? AND media_type = 'tv' AND status != 'want'"
+        ).bind(`u${user.id}`, b.tmdbId).run();
+      } else {
+        const status = b.totalEpisodes && c >= b.totalEpisodes ? 'watched' : 'watching';
+        await env.DB.prepare(
+          `INSERT INTO list_items (tmdb_id, media_type, owner_key, status, title, poster, year, tmdb_rating, added_by)
+           VALUES (?, 'tv', ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (tmdb_id, media_type, owner_key)
+           DO UPDATE SET status = excluded.status, updated_at = datetime('now')`
+        ).bind(b.tmdbId, `u${user.id}`, status, b.title || 'Unknown',
+               b.poster || null, b.year || null, b.tmdbRating ?? null, user.id).run();
+      }
+      return json({ ok: true, watchedCount: c });
+    }
+
     // ----- scrobble inbox
     if (path === '/scrobbles' && method === 'GET') {
       const { results } = await env.DB.prepare(
@@ -457,7 +569,6 @@ export async function onRequest(context) {
       const targets = [];
       if (b.assign === 'me' || b.assign === 'both') targets.push(`u${user.id}`);
       if ((b.assign === 'partner' || b.assign === 'both') && partner) targets.push(`u${partner.id}`);
-      if (b.assign === 'shared') targets.push('shared');
       if (!targets.length) return err('bad assign');
       for (const ownerKey of targets) {
         await env.DB.prepare(

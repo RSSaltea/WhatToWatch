@@ -7,6 +7,8 @@ const state = {
   tab: 'tonight',  // tonight | discover | shared | mine | partner | inbox
   lists: [],
   scrobbles: [],
+  suggestions: [],
+  partnerName: null,
   tonight: null,
   tonightScope: 'us',
   discover: null,
@@ -98,7 +100,7 @@ function ownerKeyFor(tab) {
 function render() {
   if (!state.me) return renderAuth();
   const { user, partner, region } = state.me;
-  const inboxCount = state.scrobbles.length;
+  const inboxCount = state.scrobbles.length + state.suggestions.length;
   const tabs = [
     ['tonight', 'Tonight'],
     ['discover', 'Discover'],
@@ -152,10 +154,18 @@ async function runSearch() {
   } catch { /* ignore stale searches */ }
 }
 
+function myRow(mt, id) {
+  return state.lists.find((l) =>
+    l.owner_key === `u${state.me.user.id}` && l.tmdb_id === id && l.media_type === mt);
+}
+
 function posterCard(item, extraSub = '') {
   const mt = item.mediaType || item.media_type;
   const id = item.tmdbId || item.tmdb_id;
-  const onList = state.lists.some((l) => l.tmdb_id === id && l.media_type === mt);
+  const mine = myRow(mt, id);
+  const wantOn = mine?.status === 'want';
+  const watchedOn = mine?.status === 'watched';
+  const watchingOn = mine?.status === 'watching';
   const payload = encodeURIComponent(JSON.stringify({
     tmdbId: id, mediaType: mt, title: item.title, poster: item.poster,
     year: item.year || '', tmdbRating: item.tmdbRating ?? null,
@@ -165,9 +175,12 @@ function posterCard(item, extraSub = '') {
     : `<div class="noposter">${esc(item.title)}</div>`;
   return `
     <div class="card" data-open="${mt}:${id}">
-      ${onList
-        ? '<span class="qadd done" title="Already on a list">✓</span>'
-        : `<button class="qadd" data-qadd="${payload}" title="Add to Our list → Want to watch">+</button>`}
+      <div class="qbtns">
+        <button class="qbtn ${wantOn ? 'on' : ''}" data-qwant="${payload}"
+          title="${wantOn ? 'Remove from my want-to-watch' : 'Add to my want-to-watch'}">+</button>
+        <button class="qbtn ${watchedOn ? 'on' : ''} ${watchingOn ? 'half' : ''}" data-qwatch="${payload}"
+          title="${mt === 'tv' ? 'Pick watched seasons & episodes' : (watchedOn ? 'Unmark watched' : 'Mark watched')}">✓</button>
+      </div>
       ${img}
       <div class="info">
         <div class="title">${esc(item.title)}</div>
@@ -196,13 +209,38 @@ function renderMain() {
   if (state.tab === 'tonight') return renderTonight(main);
   if (state.tab === 'discover') return renderDiscover(main);
 
-  const key = ownerKeyFor(state.tab);
-  if (!key) {
-    main.innerHTML = '<div class="empty">Your partner hasn\'t made their account yet.</div>';
-    return;
+  let items;
+  if (state.tab === 'shared') {
+    // Our list is derived: only titles on BOTH personal lists appear.
+    if (!state.me.partner) {
+      main.innerHTML = '<div class="empty">Your partner hasn\'t made their account yet.</div>';
+      return;
+    }
+    const pKey = `u${state.me.partner.id}`;
+    const theirs = new Map(state.lists.filter((i) => i.owner_key === pKey)
+      .map((i) => [`${i.media_type}:${i.tmdb_id}`, i]));
+    items = state.lists
+      .filter((i) => i.owner_key === `u${state.me.user.id}`)
+      .map((m) => {
+        const o = theirs.get(`${m.media_type}:${m.tmdb_id}`);
+        if (!o) return null;
+        const status = (m.status === 'watched' && o.status === 'watched') ? 'watched'
+          : (m.status === 'watching' || o.status === 'watching') ? 'watching' : 'want';
+        return { ...m, status };
+      })
+      .filter(Boolean);
+  } else {
+    const key = ownerKeyFor(state.tab);
+    if (!key) {
+      main.innerHTML = '<div class="empty">Your partner hasn\'t made their account yet.</div>';
+      return;
+    }
+    items = state.lists.filter((i) => i.owner_key === key);
   }
-  const items = state.lists.filter((i) => i.owner_key === key);
   const sections = [['watching', 'Watching now'], ['want', 'Want to watch'], ['watched', 'Watched']];
+  const emptyMsg = state.tab === 'shared'
+    ? 'Nothing on both your lists yet — when you both add the same thing, it lands here automatically.'
+    : 'Nothing here yet — search above to add something.';
   main.innerHTML = items.length
     ? sections.map(([status, label]) => {
         const group = items.filter((i) => i.status === status);
@@ -212,7 +250,7 @@ function renderMain() {
             posterCard({ ...i, mediaType: i.media_type, tmdbId: i.tmdb_id },
               i.rating ? `★ ${i.rating}` : '')).join('')}</div>`;
       }).join('')
-    : '<div class="empty">Nothing here yet — search above to add something.</div>';
+    : `<div class="empty">${emptyMsg}</div>`;
   wireCards(main);
 }
 
@@ -223,27 +261,114 @@ function wireCards(root) {
       openTitle(mediaType, Number(id));
     };
   });
-  root.querySelectorAll('[data-qadd]').forEach((b) => {
+  root.querySelectorAll('[data-qwant]').forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
-      const item = JSON.parse(decodeURIComponent(b.dataset.qadd));
+      const item = JSON.parse(decodeURIComponent(b.dataset.qwant));
+      const mine = myRow(item.mediaType, item.tmdbId);
       b.disabled = true;
-      b.textContent = '…';
       try {
-        await api('/lists', { method: 'POST', body: { ...item, scope: 'shared', status: 'want' } });
-        b.textContent = '✓';
-        b.classList.add('done');
-        b.title = 'Added to Our list';
-        state.tonight = null; // picks changed; recompute on next visit
-        const { items } = await api('/lists');
-        state.lists = items;
-      } catch (err2) {
-        b.textContent = '+';
-        b.disabled = false;
-        alert(err2.message);
-      }
+        if (mine && mine.status === 'want') await api(`/lists/${mine.id}`, { method: 'DELETE' });
+        else await api('/lists', { method: 'POST', body: { ...item, status: 'want' } });
+        await syncLists();
+      } catch (err2) { b.disabled = false; alert(err2.message); }
     };
   });
+  root.querySelectorAll('[data-qwatch]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const item = JSON.parse(decodeURIComponent(b.dataset.qwatch));
+      if (item.mediaType === 'tv') return openEpisodePicker(item);
+      const mine = myRow(item.mediaType, item.tmdbId);
+      b.disabled = true;
+      try {
+        if (mine && mine.status === 'watched') await api(`/lists/${mine.id}`, { method: 'DELETE' });
+        else await api('/lists', { method: 'POST', body: { ...item, status: 'watched' } });
+        await syncLists();
+      } catch (err2) { b.disabled = false; alert(err2.message); }
+    };
+  });
+}
+
+// ---------------------------------------------------------------- episode picker
+
+async function openEpisodePicker(item) {
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `<div class="modal"><div class="loading">Loading seasons…</div></div>`;
+  overlay.onclick = async (e) => { if (e.target === overlay) { closeModal(); await syncLists(); } };
+  document.body.appendChild(overlay);
+
+  let data;
+  try {
+    data = await api(`/episodes/${item.tmdbId}`);
+  } catch (e) {
+    overlay.querySelector('.modal').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
+  const expanded = new Set();
+
+  const draw = () => {
+    const modal = overlay.querySelector('.modal');
+    modal.innerHTML = `
+      <button class="close">✕</button>
+      <h2>${esc(item.title)}</h2>
+      <p class="dim">Tick what you've watched — a tick again removes it. Whole-season buttons tick every episode.</p>
+      ${data.seasons.map((s) => {
+        const mineEps = data.mine[s.season] || [];
+        const theirEps = data.partner[s.season] || [];
+        const allOn = mineEps.length >= s.episodes && s.episodes > 0;
+        return `
+          <div class="season">
+            <button class="ep-toggle ${allOn ? 'on' : (mineEps.length ? 'half' : '')}" data-season="${s.season}" data-eps="${s.episodes}">
+              ${allOn ? '✓' : '+'}</button>
+            <span class="season-name">${esc(s.name)}</span>
+            <span class="dim">${mineEps.length}/${s.episodes}${theirEps.length && data.partnerName ? ` · ${esc(data.partnerName)}: ${theirEps.length}` : ''}</span>
+            <button class="small" data-expand="${s.season}">${expanded.has(s.season) ? 'Hide' : 'Episodes'}</button>
+          </div>
+          ${expanded.has(s.season) ? `<div class="eps">
+            ${Array.from({ length: s.episodes }, (_, i) => i + 1).map((e) =>
+              `<button class="ep-toggle ${mineEps.includes(e) ? 'on' : ''}" data-ep="${s.season}:${e}">${e}</button>`).join('')}
+          </div>` : ''}`;
+      }).join('')}`;
+
+    modal.querySelector('.close').onclick = async () => { closeModal(); await syncLists(); };
+    modal.querySelectorAll('[data-expand]').forEach((b) => {
+      b.onclick = () => {
+        const s = Number(b.dataset.expand);
+        expanded.has(s) ? expanded.delete(s) : expanded.add(s);
+        draw();
+      };
+    });
+    const meta = {
+      tmdbId: item.tmdbId, title: item.title, poster: item.poster,
+      year: item.year, tmdbRating: item.tmdbRating ?? null,
+      totalEpisodes: data.totalEpisodes,
+    };
+    modal.querySelectorAll('[data-season]').forEach((b) => {
+      b.onclick = async () => {
+        const season = Number(b.dataset.season);
+        const count = Number(b.dataset.eps);
+        const allOn = (data.mine[season] || []).length >= count && count > 0;
+        b.disabled = true;
+        await api('/episodes', { method: 'POST', body: { ...meta, season, episodes: count, watched: !allOn } });
+        data.mine[season] = allOn ? [] : Array.from({ length: count }, (_, i) => i + 1);
+        draw();
+      };
+    });
+    modal.querySelectorAll('[data-ep]').forEach((b) => {
+      b.onclick = async () => {
+        const [season, ep] = b.dataset.ep.split(':').map(Number);
+        const eps = data.mine[season] = data.mine[season] || [];
+        const on = eps.includes(ep);
+        b.disabled = true;
+        await api('/episodes', { method: 'POST', body: { ...meta, season, episode: ep, watched: !on } });
+        data.mine[season] = on ? eps.filter((x) => x !== ep) : [...eps, ep];
+        draw();
+      };
+    });
+  };
+  draw();
 }
 
 // ---------------------------------------------------------------- tonight
@@ -354,19 +479,18 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
       <button class="primary" id="resolve-go">Log it</button>
     </div>` : `
     <div class="add-controls">
-      <div class="controls-label">Add to a list</div>
-      <div class="scopes">
-        <button data-scope="shared" class="active">Our list</button>
-        <button data-scope="mine">Just mine</button>
-      </div>
+      <div class="controls-label">My list <span class="dim" style="text-transform:none;letter-spacing:0">— lands on Our list automatically once it's on ${esc(state.me.partner?.name || 'your partner')}'s too</span></div>
       <div class="statuses">
         <button data-status="want">Want to watch</button>
         <button data-status="watching">Watching</button>
         <button data-status="watched">Watched</button>
+        ${t.mediaType === 'tv' ? '<button data-pick-eps>Seasons & episodes…</button>' : ''}
       </div>
-      ${mine.length ? `<div class="dim" style="margin-top:8px">Already on: ${mine.map((i) =>
-        `${i.owner_key === 'shared' ? 'our list' : i.owner_key === `u${state.me.user.id}` ? 'my list' : `${esc(state.me.partner?.name || 'partner')}'s list`} (${i.status})
-         <button class="small danger" data-remove="${i.id}">remove</button>`).join(' · ')}</div>` : ''}
+      ${mine.length ? `<div class="dim" style="margin-top:8px">Already on: ${mine.map((i) => {
+        const isMe = i.owner_key === `u${state.me.user.id}`;
+        const label = isMe ? 'my list' : `${esc(state.me.partner?.name || 'partner')}'s list`;
+        return `${label} (${i.status})${isMe ? ` <button class="small danger" data-remove="${i.id}">remove</button>` : ''}`;
+      }).join(' · ')}</div>` : ''}
     </div>`;
 
   overlay.querySelector('.modal').innerHTML = `
@@ -432,13 +556,11 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
       await refresh();
     };
   } else {
-    pick('[data-scope]');
     modal.querySelectorAll('[data-status]').forEach((b) => {
       b.onclick = async () => {
-        const scope = modal.querySelector('[data-scope].active').dataset.scope === 'shared' ? 'shared' : 'mine';
         await api('/lists', { method: 'POST', body: {
           tmdbId: t.tmdbId, mediaType: t.mediaType, status: b.dataset.status,
-          title: t.title, poster: t.poster, year: t.year, scope,
+          title: t.title, poster: t.poster, year: t.year,
           tmdbRating: t.ratings.tmdb,
         }});
         closeModal();
@@ -446,6 +568,13 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
         state.search.q = '';
         await refresh();
       };
+    });
+    modal.querySelector('[data-pick-eps]')?.addEventListener('click', () => {
+      closeModal();
+      openEpisodePicker({
+        tmdbId: t.tmdbId, mediaType: 'tv', title: t.title,
+        poster: t.poster, year: t.year, tmdbRating: t.ratings.tmdb,
+      });
     });
     modal.querySelectorAll('[data-remove]').forEach((b) => {
       b.onclick = async () => {
@@ -466,13 +595,28 @@ function fmtPosition(ms) {
 }
 
 function renderInbox(main) {
-  if (!state.scrobbles.length) {
-    main.innerHTML = `<div class="empty">No unlogged TV activity.<br>
-      <span style="font-size:13px">When the Fire TV plays something, it shows up here to be logged with one tap.</span></div>`;
+  const pn = esc(state.partnerName || 'Your partner');
+  const suggestionsHtml = state.suggestions.length ? `
+    <div class="section-title">${pn} added these — want them too?</div>
+    ${state.suggestions.map((s) => `
+      <div class="scrobble">
+        ${s.poster ? `<img class="sugg-poster" src="${esc(s.poster)}" alt="">` : ''}
+        <div class="what">
+          <div class="title">${esc(s.title)}</div>
+          <div class="dim">${pn} has it as “${esc(s.status)}” · say yes and it joins Our list</div>
+        </div>
+        <button class="primary small" data-sadd="${s.tmdb_id}:${esc(s.media_type)}">Add to my list</button>
+        <button class="small danger" data-sdismiss="${s.tmdb_id}:${esc(s.media_type)}">Dismiss</button>
+      </div>`).join('')}` : '';
+
+  if (!state.scrobbles.length && !state.suggestions.length) {
+    main.innerHTML = `<div class="empty">Nothing needs your attention.<br>
+      <span style="font-size:13px">TV activity and ${pn}'s additions land here.</span></div>`;
     return;
   }
   main.innerHTML = `
-    <div class="section-title">Spotted on the TV — who was watching?</div>
+    ${suggestionsHtml}
+    ${state.scrobbles.length ? `<div class="section-title">Spotted on the TV — who was watching?</div>` : ''}
     ${state.scrobbles.map((s) => `
       <div class="scrobble">
         <div class="what">
@@ -484,6 +628,24 @@ function renderInbox(main) {
         <button class="small danger" data-dismiss="${s.id}">Dismiss</button>
       </div>`).join('')}`;
 
+  main.querySelectorAll('[data-sadd]').forEach((b) => {
+    b.onclick = async () => {
+      const [id, mt] = b.dataset.sadd.split(':');
+      const s = state.suggestions.find((x) => x.tmdb_id === Number(id) && x.media_type === mt);
+      await api('/lists', { method: 'POST', body: {
+        tmdbId: s.tmdb_id, mediaType: s.media_type, status: 'want',
+        title: s.title, poster: s.poster, year: s.year, tmdbRating: s.tmdb_rating,
+      }});
+      await syncLists();
+    };
+  });
+  main.querySelectorAll('[data-sdismiss]').forEach((b) => {
+    b.onclick = async () => {
+      const [id, mt] = b.dataset.sdismiss.split(':');
+      await api('/suggestions', { method: 'POST', body: { tmdbId: Number(id), mediaType: mt } });
+      await syncLists();
+    };
+  });
   main.querySelectorAll('[data-dismiss]').forEach((b) => {
     b.onclick = async () => {
       await api(`/scrobbles/${b.dataset.dismiss}`, { method: 'POST', body: { action: 'dismiss' } });
@@ -541,12 +703,26 @@ function openMatchPicker(scrobble) {
 // ---------------------------------------------------------------- boot
 
 async function refresh() {
-  const [lists, scrobbles] = await Promise.all([api('/lists'), api('/scrobbles')]);
+  const [lists, scrobbles, sugg] = await Promise.all([
+    api('/lists'), api('/scrobbles'), api('/suggestions'),
+  ]);
   state.lists = lists.items;
   state.scrobbles = scrobbles.scrobbles;
+  state.suggestions = sugg.suggestions;
+  state.partnerName = sugg.partnerName;
   state.tonight = null;   // list changes alter tonight's picks
   state.discover = null;  // and the suggestion seeds
   render();
+}
+
+// Quietly refresh list state after a quick action, then re-render the
+// current view from its cached data (no full refetch, no tab reset).
+async function syncLists() {
+  const [lists, sugg] = await Promise.all([api('/lists'), api('/suggestions')]);
+  state.lists = lists.items;
+  state.suggestions = sugg.suggestions;
+  state.tonight = null;
+  renderMain();
 }
 
 async function boot() {
