@@ -1,0 +1,4 @@
+# Small site: make browsers revalidate every asset on each visit so deploys
+# show up immediately (304s keep it fast).
+/*
+  Cache-Control: no-cache
