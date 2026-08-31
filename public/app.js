@@ -13,6 +13,7 @@ const state = {
   tonightScope: 'us',
   newEps: null,
   discover: null,
+  typeFilter: 'all', // all | movie | tv — shared across tabs
   search: { q: '', results: null },
   authMode: 'login',
   authError: '',
@@ -166,6 +167,25 @@ async function runSearch() {
   } catch { /* ignore stale searches */ }
 }
 
+const matchesType = (mt) => state.typeFilter === 'all' || mt === state.typeFilter;
+
+function typeBar() {
+  return `<div class="scopes typefilter">
+    ${[['all', 'All'], ['movie', 'Films'], ['tv', 'TV shows']].map(([v, l]) =>
+      `<button data-ftype="${v}" class="${state.typeFilter === v ? 'active' : ''}">${l}</button>`).join('')}
+  </div>`;
+}
+
+function wireTypeBar(root) {
+  root.querySelectorAll('[data-ftype]').forEach((b) => {
+    b.onclick = () => {
+      state.typeFilter = b.dataset.ftype;
+      state.discover = null; // discover filters server-side
+      renderMain();
+    };
+  });
+}
+
 function myRow(mt, id) {
   return state.lists.find((l) =>
     l.owner_key === `u${state.me.user.id}` && l.tmdb_id === id && l.media_type === mt);
@@ -250,11 +270,12 @@ function renderMain() {
     }
     items = state.lists.filter((i) => i.owner_key === key);
   }
+  if (state.typeFilter !== 'all') items = items.filter((i) => i.media_type === state.typeFilter);
   const sections = [['watching', 'Watching now'], ['want', 'Want to watch'], ['watched', 'Watched']];
   const emptyMsg = state.tab === 'shared'
     ? 'Nothing on both your lists yet — when you both add the same thing, it lands here automatically.'
     : 'Nothing here yet — search above to add something.';
-  main.innerHTML = items.length
+  main.innerHTML = `<div class="tonight-bar">${typeBar()}</div>` + (items.length
     ? sections.map(([status, label]) => {
         const group = items.filter((i) => i.status === status);
         if (!group.length) return '';
@@ -263,7 +284,8 @@ function renderMain() {
             posterCard({ ...i, mediaType: i.media_type, tmdbId: i.tmdb_id },
               i.rating ? `★ ${i.rating}` : '')).join('')}</div>`;
       }).join('')
-    : `<div class="empty">${emptyMsg}</div>`;
+    : `<div class="empty">${emptyMsg}</div>`);
+  wireTypeBar(main);
   wireCards(main);
 }
 
@@ -323,10 +345,13 @@ async function openEpisodePicker(item) {
 
   const draw = () => {
     const modal = overlay.querySelector('.modal');
+    const allOn = data.seasons.length &&
+      data.seasons.every((s) => (data.mine[s.season] || []).length >= s.episodes);
     modal.innerHTML = `
       <button class="close">✕</button>
       <h2>${esc(item.title)}</h2>
       <p class="dim">Tick what you've watched — a tick again removes it. Whole-season buttons tick every episode.</p>
+      <button class="small ${allOn ? '' : 'primary'}" data-all>${allOn ? 'Untick everything' : '✓ Tick everything'}</button>
       ${data.seasons.map((s) => {
         const mineEps = data.mine[s.season] || [];
         const theirEps = data.partner[s.season] || [];
@@ -357,6 +382,15 @@ async function openEpisodePicker(item) {
       tmdbId: item.tmdbId, title: item.title, poster: item.poster,
       year: item.year, tmdbRating: item.tmdbRating ?? null,
       totalEpisodes: data.totalEpisodes,
+    };
+    modal.querySelector('[data-all]').onclick = async (ev) => {
+      ev.target.disabled = true;
+      await api('/episodes', { method: 'POST', body: {
+        ...meta, all: true, watched: !allOn, seasons: data.seasons,
+      }});
+      data.mine = allOn ? {} : Object.fromEntries(
+        data.seasons.map((s) => [s.season, Array.from({ length: s.episodes }, (_, i) => i + 1)]));
+      draw();
     };
     modal.querySelectorAll('[data-season]').forEach((b) => {
       b.onclick = async () => {
@@ -397,14 +431,19 @@ async function renderTonight(main) {
     { ...i, mediaType: i.media_type, tmdbId: i.tmdb_id },
     i.status === 'watching' ? '▶' : ''
   );
-  const hero = t.top ? `
-    <div class="hero" data-open="${t.top.media_type}:${t.top.tmdb_id}">
-      ${t.top.poster ? `<img src="${esc(t.top.poster)}" alt="">` : ''}
+  const flt = (arr) => (arr || []).filter((x) => matchesType(x.media_type || x.mediaType));
+  const cont = flt(t.continueWatching);
+  const start = flt(t.startSomething);
+  const freshF = flt(t.fresh);
+  const top = (t.top && matchesType(t.top.media_type)) ? t.top : (cont[0] || start[0] || null);
+  const hero = top ? `
+    <div class="hero" data-open="${top.media_type}:${top.tmdb_id}">
+      ${top.poster ? `<img src="${esc(top.poster)}" alt="">` : ''}
       <div>
         <div class="controls-label">Tonight's pick</div>
-        <h2>${esc(t.top.title)} <span class="dim">${esc(t.top.year || '')}</span></h2>
-        <p class="dim">${esc(t.top.why)}</p>
-        <p class="dim">${t.top.status === 'watching' ? 'Carry on where you left off.' : 'Time to finally start it.'}</p>
+        <h2>${esc(top.title)} <span class="dim">${esc(top.year || '')}</span></h2>
+        <p class="dim">${esc(top.why)}</p>
+        <p class="dim">${top.status === 'watching' ? 'Carry on where you left off.' : 'Time to finally start it.'}</p>
       </div>
     </div>` : `
     <div class="empty">Nothing to pick from yet — add things to your lists and Tonight starts working.</div>`;
@@ -414,18 +453,28 @@ async function renderTonight(main) {
         <button data-tscope="us" class="${t.scope === 'us' ? 'active' : ''}">For both of us</button>
         <button data-tscope="me" class="${t.scope === 'me' ? 'active' : ''}">Just me</button>
       </div>
+      ${typeBar()}
       <button id="shuffle" class="small">🎲 Shuffle</button>
     </div>
     ${hero}
     <div id="new-eps"></div>
-    ${t.continueWatching.length ? `<div class="section-title">Continue watching</div>
-      <div class="grid">${t.continueWatching.map(asCard).join('')}</div>` : ''}
-    ${t.startSomething.length ? `<div class="section-title">Start something</div>
-      <div class="grid">${t.startSomething.map(asCard).join('')}</div>` : ''}`;
+    ${cont.length ? `<div class="section-title">Continue watching</div>
+      <div class="grid">${cont.map(asCard).join('')}</div>` : ''}
+    ${start.length ? `<div class="section-title">Start something</div>
+      <div class="grid">${start.map(asCard).join('')}</div>` : ''}
+    ${freshF.length ? `<div class="section-title">Or try something new</div>
+      <div class="grid">${freshF.map((r) => posterCard(r,
+        `<span title="Because you watched ${esc(r.because)}">↖ ${esc(r.because.length > 14 ? r.because.slice(0, 13) + '…' : r.because)}</span>`)).join('')}</div>` : ''}`;
   main.querySelectorAll('[data-tscope]').forEach((b) => {
-    b.onclick = () => { state.tonightScope = b.dataset.tscope; state.tonight = null; renderMain(); };
+    b.onclick = () => {
+      state.tonightScope = b.dataset.tscope;
+      state.tonight = null;
+      state.newEps = null;
+      renderMain();
+    };
   });
   main.querySelector('#shuffle').onclick = () => { state.tonight = null; renderMain(); };
+  wireTypeBar(main);
   wireCards(main);
   loadNewEpisodes();
 }
@@ -439,7 +488,7 @@ async function loadNewEpisodes() {
   if (!state.newEps) {
     slot.innerHTML = '<div class="dim" style="margin:6px 0 14px">Checking for new episodes…</div>';
     try {
-      state.newEps = await api('/new-episodes');
+      state.newEps = await api(`/new-episodes?scope=${state.tonightScope}`);
     } catch { slot.innerHTML = ''; return; }
   }
   const el = document.getElementById('new-eps');
@@ -491,12 +540,12 @@ async function loadNewEpisodes() {
 async function renderDiscover(main) {
   if (!state.discover) {
     main.innerHTML = '<div class="loading">Finding things you\'d like…</div>';
-    state.discover = await api('/discover');
+    state.discover = await api(`/discover?type=${state.typeFilter}`);
     return renderDiscover(document.getElementById('main'));
   }
   const d = state.discover;
   main.innerHTML = `
-    <div class="tonight-bar"><span class="dim">Fresh picks every visit</span><button id="d-shuffle" class="small">🎲 Shuffle</button></div>
+    <div class="tonight-bar">${typeBar()}<button id="d-shuffle" class="small">🎲 Shuffle</button></div>
     ${d.suggested.length ? `<div class="section-title">Suggested for you</div>
       <div class="grid">${d.suggested.map((r) =>
         posterCard(r, r.because ? `<span title="Because you added ${esc(r.because)}">↖ ${esc(r.because.length > 14 ? r.because.slice(0, 13) + '…' : r.because)}</span>` : '')).join('')}</div>`
@@ -504,6 +553,7 @@ async function renderDiscover(main) {
     <div class="section-title">Trending</div>
     <div class="grid">${d.trending.map((r) => posterCard(r, r.tmdbRating ? `★ ${r.tmdbRating}` : '')).join('')}</div>`;
   main.querySelector('#d-shuffle').onclick = () => { state.discover = null; renderMain(); };
+  wireTypeBar(main);
   wireCards(main);
 }
 

@@ -263,13 +263,14 @@ export async function onRequest(context) {
         'SELECT * FROM list_items WHERE owner_key IN (?, ?)'
       ).bind(`u${user.id}`, partnerRow ? `u${partnerRow.id}` : 'u-none').all();
       const mineRows = rows.filter((r) => r.owner_key === `u${user.id}`);
+      const theirsMap = new Map(rows
+        .filter((r) => partnerRow && r.owner_key === `u${partnerRow.id}`)
+        .map((r) => [`${r.media_type}:${r.tmdb_id}`, r]));
       let candidates;
       if (scope === 'us' && partnerRow) {
         // "For both of us" = titles on BOTH personal lists, neither finished.
-        const theirs = new Map(rows.filter((r) => r.owner_key === `u${partnerRow.id}`)
-          .map((r) => [`${r.media_type}:${r.tmdb_id}`, r]));
         candidates = mineRows.map((m) => {
-          const o = theirs.get(`${m.media_type}:${m.tmdb_id}`);
+          const o = theirsMap.get(`${m.media_type}:${m.tmdb_id}`);
           if (!o || m.status === 'watched' || o.status === 'watched') return null;
           return {
             ...m,
@@ -307,16 +308,42 @@ export async function onRequest(context) {
         score += Math.random() * 6;
         return { ...i, score: Math.round(score * 10) / 10, why: why.join(' · ') };
       }).sort((a, b) => b.score - a.score);
+      // A few fresh (not-on-any-list) recommendations seeded by what was
+      // watched most recently in this scope — list items always come first.
+      const seedRows = mineRows
+        .filter((r) => r.status !== 'want' &&
+          (scope !== 'us' || !partnerRow || theirsMap.has(`${r.media_type}:${r.tmdb_id}`)))
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        .slice(0, 3);
+      const inLists = new Set(rows.map((r) => `${r.media_type}:${r.tmdb_id}`));
+      const recs = await Promise.all(seedRows.map((s) =>
+        tmdb(env, `/${s.media_type}/${s.tmdb_id}/recommendations`).catch(() => ({ results: [] }))));
+      const fresh = [];
+      const freshKeys = new Set();
+      recs.forEach((data, i) => {
+        for (const r of (data.results || []).slice(0, 8)) {
+          const type = r.media_type || seedRows[i].media_type;
+          const key = `${type}:${r.id}`;
+          if (inLists.has(key) || freshKeys.has(key) || !r.poster_path) continue;
+          freshKeys.add(key);
+          fresh.push({ ...mapSearchResult(r), mediaType: type, because: seedRows[i].title });
+        }
+      });
+      fresh.sort(() => Math.random() - 0.5);
+
       return json({
         scope,
         top: picks[0] || null,
         continueWatching: picks.filter((p) => p.status === 'watching').slice(0, 8),
         startSomething: picks.filter((p) => p.status === 'want').slice(0, 8),
+        fresh: fresh.slice(0, 6),
       });
     }
 
     // Trending titles plus suggestions seeded from the household's lists.
     if (path === '/discover') {
+      const dType = ['movie', 'tv'].includes(url.searchParams.get('type'))
+        ? url.searchParams.get('type') : 'all';
       const { results: listRows } = await env.DB.prepare(
         'SELECT DISTINCT tmdb_id, media_type, title, rating, updated_at FROM list_items ORDER BY updated_at DESC'
       ).all();
@@ -328,7 +355,7 @@ export async function onRequest(context) {
       const trendPage = 1 + Math.floor(Math.random() * 5);
 
       const [trendingData, ...recData] = await Promise.all([
-        tmdb(env, `/trending/all/${trendWindow}`, { page: trendPage }),
+        tmdb(env, `/trending/${dType}/${trendWindow}`, { page: trendPage }),
         ...seeds.map((s) =>
           tmdb(env, `/${s.media_type}/${s.tmdb_id}/recommendations`, {
             page: 1 + Math.floor(Math.random() * 2),
@@ -337,6 +364,7 @@ export async function onRequest(context) {
       ]);
 
       const trending = (trendingData.results || [])
+        .map((r) => ({ ...r, media_type: r.media_type || dType }))
         .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path)
         .sort(() => Math.random() - 0.5)
         .slice(0, 18)
@@ -349,6 +377,7 @@ export async function onRequest(context) {
           const type = r.media_type || seeds[i].media_type;
           const key = `${type}:${r.id}`;
           if (inLists.has(key) || !r.poster_path) continue;
+          if (dType !== 'all' && type !== dType) continue;
           const entry = scored.get(key);
           if (entry) entry.score += 1;
           else scored.set(key, {
@@ -457,12 +486,21 @@ export async function onRequest(context) {
 
     // ----- new/upcoming episodes for shows the household has been watching
     if (path === '/new-episodes') {
+      const scope = url.searchParams.get('scope') === 'me' ? 'me' : 'us';
       const p = await env.DB.prepare('SELECT id, name FROM users WHERE id != ?').bind(user.id).first();
-      const { results: shows } = await env.DB.prepare(
-        `SELECT DISTINCT tmdb_id, title, poster FROM list_items
-         WHERE media_type = 'tv' AND status IN ('watching', 'watched')
-         AND owner_key IN (?, ?) LIMIT 25`
+      const { results: epRows } = await env.DB.prepare(
+        `SELECT * FROM list_items WHERE media_type = 'tv'
+         AND status IN ('watching', 'watched') AND owner_key IN (?, ?)`
       ).bind(`u${user.id}`, p ? `u${p.id}` : 'u-none').all();
+      const mineShows = epRows.filter((r) => r.owner_key === `u${user.id}`);
+      const partnerShows = new Map(epRows
+        .filter((r) => p && r.owner_key === `u${p.id}`)
+        .map((r) => [r.tmdb_id, r]));
+      // "For both of us" only tracks shows you're BOTH watching.
+      const shows = (scope === 'us' && p
+        ? mineShows.filter((m) => partnerShows.has(m.tmdb_id))
+        : mineShows
+      ).slice(0, 25);
       const { results: watchRows } = await env.DB.prepare(
         'SELECT user_id, tmdb_id, season, episode FROM episode_watches WHERE user_id IN (?, ?)'
       ).bind(user.id, p?.id ?? -1).all();
@@ -479,8 +517,17 @@ export async function onRequest(context) {
           .reduce((a, x) => a + x.episode_count, 0);
         const last = d.last_episode_to_air;
         if (last?.season_number) {
-          const meSeen = seen.has(`${user.id}:${s.tmdb_id}:${last.season_number}:${last.episode_number}`);
-          const partnerSeen = p ? seen.has(`${p.id}:${s.tmdb_id}:${last.season_number}:${last.episode_number}`) : true;
+          const air = (last.air_date || '').slice(0, 10);
+          const ticked = (uid) =>
+            seen.has(`${uid}:${s.tmdb_id}:${last.season_number}:${last.episode_number}`);
+          // A show marked watched at show level counts as seen for anything
+          // that aired before that mark was made.
+          const coveredBy = (row) =>
+            !!(row && row.status === 'watched' && air && row.updated_at.slice(0, 10) >= air);
+          const meSeen = ticked(user.id) || coveredBy(s);
+          const partnerSeen = (scope === 'me' || !p)
+            ? true
+            : (ticked(p.id) || coveredBy(partnerShows.get(s.tmdb_id)));
           if (!meSeen || !partnerSeen) {
             newEpisodes.push({
               tmdbId: s.tmdb_id, title: s.title || d.name, poster: s.poster,
@@ -552,8 +599,27 @@ export async function onRequest(context) {
 
     if (path === '/episodes' && method === 'POST') {
       const b = await request.json();
-      if (!b.tmdbId || !b.season || typeof b.watched !== 'boolean') return err('missing fields');
-      if (b.episode) {
+      if (!b.tmdbId || typeof b.watched !== 'boolean' || (!b.season && !b.all)) {
+        return err('missing fields');
+      }
+      if (b.all) {
+        // Whole show on/off in one go.
+        if (b.watched) {
+          const stmts = [];
+          for (const s of b.seasons || []) {
+            for (let e = 1; e <= (s.episodes || 0); e++) {
+              stmts.push(env.DB.prepare(
+                'INSERT OR IGNORE INTO episode_watches (user_id, tmdb_id, season, episode) VALUES (?, ?, ?, ?)'
+              ).bind(user.id, b.tmdbId, s.season, e));
+            }
+          }
+          if (stmts.length) await env.DB.batch(stmts);
+        } else {
+          await env.DB.prepare(
+            'DELETE FROM episode_watches WHERE user_id = ? AND tmdb_id = ?'
+          ).bind(user.id, b.tmdbId).run();
+        }
+      } else if (b.episode) {
         if (b.watched) {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO episode_watches (user_id, tmdb_id, season, episode) VALUES (?, ?, ?, ?)'
