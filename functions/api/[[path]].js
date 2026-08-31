@@ -195,9 +195,12 @@ export async function onRequest(context) {
 
     // ----- auth
     if (path === '/auth/register' && method === 'POST') {
-      const { name, password } = await request.json();
+      const { name, password, code } = await request.json();
       if (!name?.trim() || !password || password.length < 6) {
         return err('Need a name and a password of at least 6 characters.');
+      }
+      if (env.REGISTER_CODE && code !== env.REGISTER_CODE) {
+        return err('Wrong invite code — this site is invite-only.', 403);
       }
       const { c } = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
       if (c >= 2) return err('This household already has its two accounts.', 403);
@@ -248,11 +251,104 @@ export async function onRequest(context) {
       return json({ results });
     }
 
+    // "What should we watch tonight?" — scores the household's unwatched
+    // items. The formula (see /README): continuing beats starting, momentum
+    // decays over a week, neglected want-list items slowly bubble up, your
+    // own rating or the public rating adds quality points, and a little
+    // nightly jitter keeps the list fresh.
+    if (path === '/tonight') {
+      const scope = url.searchParams.get('scope') === 'me' ? 'me' : 'us';
+      const keys = scope === 'us' ? ['shared'] : ['shared', `u${user.id}`];
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM list_items WHERE status IN ('want','watching')
+         AND owner_key IN (${keys.map(() => '?').join(',')})`
+      ).bind(...keys).all();
+      const now = Date.now();
+      const picks = results.map((i) => {
+        const days = Math.max(0, (now - Date.parse(i.updated_at.replace(' ', 'T') + 'Z')) / 86400000);
+        let score = 0;
+        const why = [];
+        if (i.status === 'watching') {
+          score += 40 + 25 * Math.exp(-days / 7);
+          why.push(days < 10
+            ? (days < 1.5 ? 'you watched this recently' : `last watched ${Math.round(days)} days ago`)
+            : `untouched for ${Math.round(days)} days — keep it going?`);
+        } else {
+          score += 20 + Math.min(days / 60, 1) * 15;
+          why.push(days > 45
+            ? `waiting on the list for ${Math.round(days / 30)} month${days > 75 ? 's' : ''}`
+            : 'on the want-to-watch list');
+        }
+        if (i.rating) {
+          score += (i.rating - 5) * 3;
+          why.push(`rated ${i.rating}/10 by you`);
+        } else if (i.tmdb_rating) {
+          score += Math.max(0, Math.min((i.tmdb_rating - 6) * 5, 15));
+          if (i.tmdb_rating >= 7.5) why.push(`rated ${i.tmdb_rating} on TMDB`);
+        }
+        score += Math.random() * 6;
+        return { ...i, score: Math.round(score * 10) / 10, why: why.join(' · ') };
+      }).sort((a, b) => b.score - a.score);
+      return json({
+        scope,
+        top: picks[0] || null,
+        continueWatching: picks.filter((p) => p.status === 'watching').slice(0, 8),
+        startSomething: picks.filter((p) => p.status === 'want').slice(0, 8),
+      });
+    }
+
+    // Trending titles plus suggestions seeded from the household's lists.
+    if (path === '/discover') {
+      const { results: listRows } = await env.DB.prepare(
+        'SELECT DISTINCT tmdb_id, media_type, title, rating, updated_at FROM list_items ORDER BY updated_at DESC'
+      ).all();
+      const inLists = new Set(listRows.map((r) => `${r.media_type}:${r.tmdb_id}`));
+
+      // Seeds: highest-rated first, then most recent activity.
+      const seeds = [...listRows]
+        .sort((a, b) => (b.rating || 0) - (a.rating || 0))
+        .slice(0, 5);
+
+      const [trendingData, ...recData] = await Promise.all([
+        tmdb(env, '/trending/all/week'),
+        ...seeds.map((s) =>
+          tmdb(env, `/${s.media_type}/${s.tmdb_id}/recommendations`).catch(() => ({ results: [] }))
+        ),
+      ]);
+
+      const trending = (trendingData.results || [])
+        .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path)
+        .slice(0, 18)
+        .map(mapSearchResult);
+
+      // Merge recommendations, scoring repeats across seeds higher.
+      const scored = new Map();
+      recData.forEach((data, i) => {
+        for (const r of (data.results || []).slice(0, 12)) {
+          const type = r.media_type || seeds[i].media_type;
+          const key = `${type}:${r.id}`;
+          if (inLists.has(key) || !r.poster_path) continue;
+          const entry = scored.get(key);
+          if (entry) entry.score += 1;
+          else scored.set(key, {
+            ...mapSearchResult(r), mediaType: type,
+            because: seeds[i].title, score: 1,
+          });
+        }
+      });
+      const suggested = [...scored.values()]
+        .sort((a, b) => b.score - a.score || (b.tmdbRating || 0) - (a.tmdbRating || 0))
+        .slice(0, 18)
+        .map(({ score, ...s }) => s);
+
+      return json({ trending, suggested });
+    }
+
     const titleMatch = path.match(/^\/title\/(movie|tv)\/(\d+)$/);
     if (titleMatch) {
       const [, mediaType, id] = titleMatch;
       const details = await tmdb(env, `/${mediaType}/${id}`, {
-        append_to_response: 'external_ids,watch/providers',
+        append_to_response: 'external_ids,watch/providers,recommendations',
       });
       const [prices, omdb] = await Promise.all([
         fetchPrices(env, mediaType, id, region),
@@ -277,6 +373,10 @@ export async function onRequest(context) {
           imdb: omdb.imdbRating || null,
         },
         region,
+        similar: (details.recommendations?.results || [])
+          .filter((r) => r.poster_path)
+          .slice(0, 10)
+          .map((r) => ({ ...mapSearchResult(r), mediaType: r.media_type || mediaType })),
         providers: {
           link: region_providers.link || null,
           stream: mapProviders(region_providers.flatrate, null, ''),
@@ -304,14 +404,16 @@ export async function onRequest(context) {
         return err('missing fields');
       }
       await env.DB.prepare(
-        `INSERT INTO list_items (tmdb_id, media_type, owner_key, status, title, poster, year, rating, added_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO list_items (tmdb_id, media_type, owner_key, status, title, poster, year, rating, tmdb_rating, added_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tmdb_id, media_type, owner_key)
          DO UPDATE SET status = excluded.status,
                        rating = COALESCE(excluded.rating, list_items.rating),
+                       tmdb_rating = COALESCE(excluded.tmdb_rating, list_items.tmdb_rating),
                        updated_at = datetime('now')`
       ).bind(b.tmdbId, b.mediaType, ownerKey, b.status, b.title,
-             b.poster || null, b.year || null, b.rating ?? null, user.id).run();
+             b.poster || null, b.year || null, b.rating ?? null,
+             b.tmdbRating ?? null, user.id).run();
       return json({ ok: true });
     }
 
@@ -359,12 +461,12 @@ export async function onRequest(context) {
       if (!targets.length) return err('bad assign');
       for (const ownerKey of targets) {
         await env.DB.prepare(
-          `INSERT INTO list_items (tmdb_id, media_type, owner_key, status, title, poster, year, added_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO list_items (tmdb_id, media_type, owner_key, status, title, poster, year, tmdb_rating, added_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (tmdb_id, media_type, owner_key)
            DO UPDATE SET status = excluded.status, updated_at = datetime('now')`
         ).bind(b.tmdbId, b.mediaType, ownerKey, b.status, b.title,
-               b.poster || null, b.year || null, user.id).run();
+               b.poster || null, b.year || null, b.tmdbRating ?? null, user.id).run();
       }
       await env.DB.prepare("UPDATE scrobbles SET status = 'resolved' WHERE id = ?").bind(sid).run();
       return json({ ok: true });

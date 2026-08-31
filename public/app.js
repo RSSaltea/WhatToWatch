@@ -4,9 +4,12 @@ const $app = document.getElementById('app');
 
 const state = {
   me: null,        // { user, partner, region }
-  tab: 'shared',   // shared | mine | partner | inbox
+  tab: 'tonight',  // tonight | discover | shared | mine | partner | inbox
   lists: [],
   scrobbles: [],
+  tonight: null,
+  tonightScope: 'us',
+  discover: null,
   search: { q: '', results: null },
   authMode: 'login',
   authError: '',
@@ -56,6 +59,7 @@ function renderAuth() {
       <p class="sub">${login ? 'Welcome back' : 'Create your account (two per household)'}</p>
       <input id="auth-name" placeholder="Your name" autocomplete="username">
       <input id="auth-pass" type="password" placeholder="Password" autocomplete="${login ? 'current-password' : 'new-password'}">
+      ${login ? '' : '<input id="auth-code" placeholder="Invite code">'}
       <p class="error">${esc(state.authError)}</p>
       <button class="primary" id="auth-go">${login ? 'Sign in' : 'Create account'}</button>
       <p class="switch">${login ? 'First time?' : 'Already set up?'}
@@ -69,8 +73,9 @@ function renderAuth() {
   const go = async () => {
     const name = document.getElementById('auth-name').value;
     const password = document.getElementById('auth-pass').value;
+    const code = document.getElementById('auth-code')?.value;
     try {
-      await api(`/auth/${login ? 'login' : 'register'}`, { method: 'POST', body: { name, password } });
+      await api(`/auth/${login ? 'login' : 'register'}`, { method: 'POST', body: { name, password, code } });
       await boot();
     } catch (e) {
       state.authError = e.message;
@@ -95,6 +100,8 @@ function render() {
   const { user, partner, region } = state.me;
   const inboxCount = state.scrobbles.length;
   const tabs = [
+    ['tonight', 'Tonight'],
+    ['discover', 'Discover'],
     ['shared', 'Our list'],
     ['mine', 'My list'],
     ['partner', partner ? `${esc(partner.name)}'s list` : 'Partner'],
@@ -176,6 +183,8 @@ function renderMain() {
   }
 
   if (state.tab === 'inbox') return renderInbox(main);
+  if (state.tab === 'tonight') return renderTonight(main);
+  if (state.tab === 'discover') return renderDiscover(main);
 
   const key = ownerKeyFor(state.tab);
   if (!key) {
@@ -204,6 +213,69 @@ function wireCards(root) {
       openTitle(mediaType, Number(id));
     };
   });
+}
+
+// ---------------------------------------------------------------- tonight
+
+async function renderTonight(main) {
+  if (!state.tonight) {
+    main.innerHTML = '<div class="loading">Thinking about tonight…</div>';
+    state.tonight = await api(`/tonight?scope=${state.tonightScope}`);
+    return renderTonight(document.getElementById('main'));
+  }
+  const t = state.tonight;
+  const asCard = (i) => posterCard(
+    { ...i, mediaType: i.media_type, tmdbId: i.tmdb_id },
+    i.status === 'watching' ? '▶' : ''
+  );
+  const hero = t.top ? `
+    <div class="hero" data-open="${t.top.media_type}:${t.top.tmdb_id}">
+      ${t.top.poster ? `<img src="${esc(t.top.poster)}" alt="">` : ''}
+      <div>
+        <div class="controls-label">Tonight's pick</div>
+        <h2>${esc(t.top.title)} <span class="dim">${esc(t.top.year || '')}</span></h2>
+        <p class="dim">${esc(t.top.why)}</p>
+        <p class="dim">${t.top.status === 'watching' ? 'Carry on where you left off.' : 'Time to finally start it.'}</p>
+      </div>
+    </div>` : `
+    <div class="empty">Nothing to pick from yet — add things to your lists and Tonight starts working.</div>`;
+  main.innerHTML = `
+    <div class="tonight-bar">
+      <div class="scopes">
+        <button data-tscope="us" class="${t.scope === 'us' ? 'active' : ''}">For both of us</button>
+        <button data-tscope="me" class="${t.scope === 'me' ? 'active' : ''}">Just me</button>
+      </div>
+      <button id="shuffle" class="small">🎲 Shuffle</button>
+    </div>
+    ${hero}
+    ${t.continueWatching.length ? `<div class="section-title">Continue watching</div>
+      <div class="grid">${t.continueWatching.map(asCard).join('')}</div>` : ''}
+    ${t.startSomething.length ? `<div class="section-title">Start something</div>
+      <div class="grid">${t.startSomething.map(asCard).join('')}</div>` : ''}`;
+  main.querySelectorAll('[data-tscope]').forEach((b) => {
+    b.onclick = () => { state.tonightScope = b.dataset.tscope; state.tonight = null; renderMain(); };
+  });
+  main.querySelector('#shuffle').onclick = () => { state.tonight = null; renderMain(); };
+  wireCards(main);
+}
+
+// ---------------------------------------------------------------- discover
+
+async function renderDiscover(main) {
+  if (!state.discover) {
+    main.innerHTML = '<div class="loading">Finding things you\'d like…</div>';
+    state.discover = await api('/discover');
+    return renderDiscover(document.getElementById('main'));
+  }
+  const d = state.discover;
+  main.innerHTML = `
+    ${d.suggested.length ? `<div class="section-title">Suggested for you</div>
+      <div class="grid">${d.suggested.map((r) =>
+        posterCard(r, r.because ? `<span title="Because you added ${esc(r.because)}">↖ ${esc(r.because.length > 14 ? r.because.slice(0, 13) + '…' : r.because)}</span>` : '')).join('')}</div>`
+      : '<div class="empty">Add a few things to your lists and suggestions appear here.</div>'}
+    <div class="section-title">Trending this week</div>
+    <div class="grid">${d.trending.map((r) => posterCard(r, r.tmdbRating ? `★ ${r.tmdbRating}` : '')).join('')}</div>`;
+  wireCards(main);
 }
 
 // ---------------------------------------------------------------- title modal
@@ -289,10 +361,20 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
       ${provRow('Stream', t.providers.stream) + provRow('Rent', t.providers.rent) + provRow('Buy', t.providers.buy)
         || '<div class="dim" style="margin-top:6px">Not currently available to stream in your region.</div>'}
     </div>
+    ${t.similar?.length ? `<div class="controls-label" style="margin-top:14px">More like this</div>
+      <div class="similar">${t.similar.map((s) =>
+        `<img src="${esc(s.poster)}" alt="${esc(s.title)}" title="${esc(s.title)}" data-similar="${s.mediaType}:${s.tmdbId}" loading="lazy">`).join('')}</div>` : ''}
     ${resolveControls}`;
 
   const modal = overlay.querySelector('.modal');
   modal.querySelector('.close').onclick = closeModal;
+  modal.querySelectorAll('[data-similar]').forEach((el) => {
+    el.onclick = () => {
+      const [mt, id] = el.dataset.similar.split(':');
+      closeModal();
+      openTitle(mt, Number(id), resolveScrobble);
+    };
+  });
 
   const pick = (sel) => {
     modal.querySelectorAll(sel).forEach((b) => {
@@ -313,7 +395,7 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
       if (!assign) return;
       await api(`/scrobbles/${resolveScrobble.id}`, { method: 'POST', body: {
         assign, status, tmdbId: t.tmdbId, mediaType: t.mediaType,
-        title: t.title, poster: t.poster, year: t.year,
+        title: t.title, poster: t.poster, year: t.year, tmdbRating: t.ratings.tmdb,
       }});
       closeModal();
       await refresh();
@@ -326,6 +408,7 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
         await api('/lists', { method: 'POST', body: {
           tmdbId: t.tmdbId, mediaType: t.mediaType, status: b.dataset.status,
           title: t.title, poster: t.poster, year: t.year, scope,
+          tmdbRating: t.ratings.tmdb,
         }});
         closeModal();
         state.search.results = null;
@@ -430,6 +513,8 @@ async function refresh() {
   const [lists, scrobbles] = await Promise.all([api('/lists'), api('/scrobbles')]);
   state.lists = lists.items;
   state.scrobbles = scrobbles.scrobbles;
+  state.tonight = null;   // list changes alter tonight's picks
+  state.discover = null;  // and the suggestion seeds
   render();
 }
 

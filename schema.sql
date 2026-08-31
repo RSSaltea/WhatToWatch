@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS list_items (
   poster TEXT,
   year TEXT,
   rating INTEGER,
+  tmdb_rating REAL,
   added_by INTEGER,
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (tmdb_id, media_type, owner_key)
