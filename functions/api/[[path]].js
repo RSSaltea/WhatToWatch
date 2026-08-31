@@ -183,12 +183,18 @@ export async function onRequest(context) {
       ).bind(b.app, b.title || null).first();
       if (existing) {
         await env.DB.prepare(
-          `UPDATE scrobbles SET state = ?, position_ms = ?, last_seen = datetime('now') WHERE id = ?`
-        ).bind(b.state, b.positionMs ?? null, existing.id).run();
+          `UPDATE scrobbles SET state = ?, position_ms = ?, last_seen = datetime('now'),
+             subtitle = COALESCE(?, subtitle), description = COALESCE(?, description),
+             duration_ms = COALESCE(?, duration_ms)
+           WHERE id = ?`
+        ).bind(b.state, b.positionMs ?? null, b.subtitle || null,
+               b.description || null, b.durationMs ?? null, existing.id).run();
       } else {
         await env.DB.prepare(
-          `INSERT INTO scrobbles (app, title, state, position_ms) VALUES (?, ?, ?, ?)`
-        ).bind(b.app, b.title || null, b.state, b.positionMs ?? null).run();
+          `INSERT INTO scrobbles (app, title, subtitle, description, state, position_ms, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        ).bind(b.app, b.title || null, b.subtitle || null, b.description || null,
+               b.state, b.positionMs ?? null, b.durationMs ?? null).run();
       }
       return json({ ok: true });
     }
@@ -698,8 +704,36 @@ export async function onRequest(context) {
         ).bind(b.tmdbId, b.mediaType, ownerKey, b.status, b.title,
                b.poster || null, b.year || null, b.tmdbRating ?? null, user.id).run();
       }
+      // Best effort: match the scrobbled episode title to a real episode via
+      // TVMaze and tick it for everyone this was logged for.
+      let episodeMatch = null;
+      if (b.mediaType === 'tv') {
+        const sc = await env.DB.prepare('SELECT title FROM scrobbles WHERE id = ?').bind(sid).first();
+        if (sc?.title) {
+          try {
+            const tvm = await fetch(
+              `https://api.tvmaze.com/singlesearch/shows?q=${encodeURIComponent(b.title)}&embed=episodes`
+            );
+            if (tvm.ok) {
+              const data = await tvm.json();
+              const norm = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+              const wanted = norm(sc.title);
+              const ep = (data._embedded?.episodes || [])
+                .find((e) => e.name && norm(e.name) === wanted);
+              if (ep?.season && ep?.number) {
+                episodeMatch = { season: ep.season, episode: ep.number };
+                for (const t of targets) {
+                  await env.DB.prepare(
+                    'INSERT OR IGNORE INTO episode_watches (user_id, tmdb_id, season, episode) VALUES (?, ?, ?, ?)'
+                  ).bind(Number(t.slice(1)), b.tmdbId, ep.season, ep.number).run();
+                }
+              }
+            }
+          } catch { /* matching is a bonus, never block resolving */ }
+        }
+      }
       await env.DB.prepare("UPDATE scrobbles SET status = 'resolved' WHERE id = ?").bind(sid).run();
-      return json({ ok: true });
+      return json({ ok: true, episodeMatch });
     }
 
     return err('not found', 404);

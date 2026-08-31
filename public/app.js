@@ -767,9 +767,9 @@ function renderInbox(main) {
     ${state.scrobbles.map((s) => `
       <div class="scrobble">
         <div class="what">
-          <div class="app-name">${esc(APP_NAMES[s.app] || s.app)}</div>
+          <div class="app-name">${esc(APP_NAMES[s.app] || s.app)}${s.subtitle ? ` · ${esc(s.subtitle)}` : ''}</div>
           <div class="title">${esc(s.title || 'Unknown title')}</div>
-          <div class="dim">${esc(s.state)} · ${fmtPosition(s.position_ms)} · ${esc(s.last_seen)} UTC</div>
+          <div class="dim">${esc(s.state)} · ${fmtPosition(s.position_ms)}${s.duration_ms ? ` (${Math.min(100, Math.round(100 * s.position_ms / s.duration_ms))}%)` : ''} · ${esc(s.last_seen)} UTC</div>
         </div>
         <button class="primary small" data-match="${s.id}">Log it</button>
         <button class="small danger" data-dismiss="${s.id}">Dismiss</button>
@@ -798,9 +798,9 @@ function openMatchPicker(scrobble) {
     <div class="modal">
       <button class="close">✕</button>
       <h2>What was this?</h2>
-      <p class="dim">The TV reported: <b>${esc(scrobble.title || 'no title')}</b> (${esc(APP_NAMES[scrobble.app] || scrobble.app)}).
-      Search for the show or film it belongs to:</p>
-      <input id="match-q" value="${esc(scrobble.title || '')}" placeholder="Search…">
+      <p class="dim">The TV reported: <b>${esc(scrobble.title || 'no title')}</b>${scrobble.subtitle ? ` from <b>${esc(scrobble.subtitle)}</b>` : ''} (${esc(APP_NAMES[scrobble.app] || scrobble.app)}).
+      Type the <b>show or film name</b> below — if the episode title above matches, the exact episode gets ticked automatically.</p>
+      <input id="match-q" value="${esc(scrobble.subtitle || '')}" placeholder="Show or film name (e.g. Friends)">
       <div id="match-results" style="margin-top:14px"></div>
     </div>`;
   document.body.appendChild(overlay);

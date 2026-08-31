@@ -32,8 +32,11 @@ CREATE TABLE IF NOT EXISTS scrobbles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   app TEXT NOT NULL,
   title TEXT,
+  subtitle TEXT,
+  description TEXT,
   state TEXT NOT NULL,
   position_ms INTEGER,
+  duration_ms INTEGER,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'resolved', 'dismissed')),
   first_seen TEXT NOT NULL DEFAULT (datetime('now')),
   last_seen TEXT NOT NULL DEFAULT (datetime('now'))

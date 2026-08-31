@@ -88,17 +88,28 @@ class ScrobbleService : NotificationListenerService() {
         val title = md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
             ?: md?.getString(MediaMetadata.METADATA_KEY_TITLE)
             ?: md?.description?.title?.toString()
+        // Apps stash the show name in different fields — try them all.
+        val subtitle = md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
+            ?: md?.description?.subtitle?.toString()
+            ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM)
+            ?: md?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+        val description = (md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION)
+            ?: md?.description?.description?.toString())?.take(300)
+        val durationMs = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
 
         // Skip exact repeats of what we last sent for this app.
-        val fingerprint = "$stateName|$title"
+        val fingerprint = "$stateName|$title|$subtitle"
         if (lastSent[c.packageName] == fingerprint) return
         lastSent[c.packageName] = fingerprint
 
         val body = JSONObject()
             .put("app", c.packageName)
             .put("title", title ?: JSONObject.NULL)
+            .put("subtitle", subtitle ?: JSONObject.NULL)
+            .put("description", description ?: JSONObject.NULL)
             .put("state", stateName)
             .put("positionMs", state.position)
+            .put("durationMs", if (durationMs > 0) durationMs else JSONObject.NULL)
             .toString()
 
         executor.execute { post(body) }
