@@ -16,6 +16,7 @@ const state = {
   discover: null,
   typeFilter: 'all', // all | movie | tv — shared across tabs
   pools: {},         // backfillable grids: displayed items + spares
+  niOpen: false,     // "not interested" section on Discover
   search: { q: '', results: null },
   authMode: 'login',
   authError: '',
@@ -237,7 +238,7 @@ function myRow(mt, id) {
     l.owner_key === `u${state.me.user.id}` && l.tmdb_id === id && l.media_type === mt);
 }
 
-function posterCard(item, extraSub = '') {
+function posterCard(item, extraSub = '', dismissable = false) {
   const mt = item.mediaType || item.media_type;
   const id = item.tmdbId || item.tmdb_id;
   const mine = myRow(mt, id);
@@ -258,6 +259,7 @@ function posterCard(item, extraSub = '') {
           title="${wantOn ? 'Remove from my want-to-watch' : 'Add to my want-to-watch'}">+</button>
         <button class="qbtn ${watchedOn ? 'on' : ''} ${watchingOn ? 'half' : ''}" data-qwatch="${payload}"
           title="${mt === 'tv' ? 'Pick watched seasons & episodes' : (watchedOn ? 'Unmark watched' : 'Mark watched')}">✓</button>
+        ${dismissable ? `<button class="qbtn dismiss" data-notint="${payload}" title="Not interested — don't show me this again">✕</button>` : ''}
       </div>
       ${img}
       <div class="info">
@@ -357,11 +359,25 @@ function wireCards(root) {
       } catch (err2) { b.disabled = false; alert(err2.message); }
     };
   });
+  root.querySelectorAll('[data-notint]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const item = JSON.parse(decodeURIComponent(b.dataset.notint));
+      b.disabled = true;
+      try {
+        await api('/not-interested', { method: 'POST', body: item });
+        const card = b.closest('.card');
+        const grid = card?.closest('[data-pool]');
+        if (grid) animateReplace(card, grid.dataset.pool, `${item.mediaType}:${item.tmdbId}`);
+        else { card.classList.add('card-out'); setTimeout(() => card.remove(), 250); }
+      } catch (err2) { b.disabled = false; alert(err2.message); }
+    };
+  });
   root.querySelectorAll('[data-qwatch]').forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
       const item = JSON.parse(decodeURIComponent(b.dataset.qwatch));
-      if (item.mediaType === 'tv') return openEpisodePicker(item);
+      if (item.mediaType === 'tv') return openEpisodePicker(item, b);
       const mine = myRow(item.mediaType, item.tmdbId);
       const removing = mine && mine.status === 'watched';
       b.disabled = true;
@@ -376,11 +392,26 @@ function wireCards(root) {
 
 // ---------------------------------------------------------------- episode picker
 
-async function openEpisodePicker(item) {
+async function openEpisodePicker(item, sourceBtn = null) {
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
   overlay.innerHTML = `<div class="modal"><div class="loading">Loading seasons…</div></div>`;
-  overlay.onclick = async (e) => { if (e.target === overlay) { closeModal(); await syncLists(); } };
+  // On close: if this came from a Discover-style card and the show is now on
+  // the list, retire that card in place; otherwise re-render (refetching
+  // Discover so listed shows drop out).
+  const finalize = async () => {
+    closeModal();
+    await fetchListsQuiet();
+    const card = sourceBtn?.closest('.card');
+    const grid = card?.closest('[data-pool]');
+    if (grid && myRow('tv', item.tmdbId)) {
+      animateReplace(card, grid.dataset.pool, `tv:${item.tmdbId}`);
+      return;
+    }
+    if (state.tab === 'discover') state.discover = null;
+    renderMain();
+  };
+  overlay.onclick = (e) => { if (e.target === overlay) finalize(); };
   document.body.appendChild(overlay);
 
   let data;
@@ -436,7 +467,7 @@ async function openEpisodePicker(item) {
           </div>` : 'Loading episode details…'}</div>`) : ''}`;
       }).join('')}`;
 
-    modal.querySelector('.close').onclick = async () => { closeModal(); await syncLists(); };
+    modal.querySelector('.close').onclick = finalize;
     modal.querySelectorAll('[data-expand]').forEach((b) => {
       b.onclick = async () => {
         const s = Number(b.dataset.expand);
@@ -512,7 +543,7 @@ async function renderTonight(main) {
   const start = flt(t.startSomething);
   const freshF = flt(t.fresh);
   state.pools = { ...state.pools,
-    't-fresh': { items: freshF.slice(0, 6), spares: freshF.slice(6), sub: becauseTag } };
+    't-fresh': { items: freshF.slice(0, 6), spares: freshF.slice(6), sub: becauseTag, dismiss: true } };
   const top = (t.top && matchesType(t.top.media_type)) ? t.top : (cont[0] || start[0] || null);
   const hero = top ? `
     <div class="hero" data-open="${top.media_type}:${top.tmdb_id}">
@@ -542,7 +573,7 @@ async function renderTonight(main) {
       <div class="grid" data-section="want">${start.map(asCard).join('')}</div>` : ''}
     ${freshF.length ? `<div class="section-title">Or try something new</div>
       <div class="grid" data-pool="t-fresh">${state.pools['t-fresh'].items.map((r) =>
-        posterCard(r, becauseTag(r))).join('')}</div>` : ''}`;
+        posterCard(r, becauseTag(r), true)).join('')}</div>` : ''}`;
   main.querySelectorAll('[data-tscope]').forEach((b) => {
     b.onclick = () => {
       state.tonightScope = b.dataset.tscope;
@@ -635,26 +666,62 @@ async function renderDiscover(main) {
   const d = state.discover;
   const starTag = (r) => r.tmdbRating ? `★ ${r.tmdbRating}` : '';
   state.pools = { ...state.pools,
-    'd-suggested': { items: d.suggested.slice(0, 18), spares: d.suggested.slice(18), sub: becauseTag },
-    'd-trending': { items: d.trending.slice(0, 18), spares: d.trending.slice(18), sub: starTag },
+    'd-suggested': { items: d.suggested.slice(0, 18), spares: d.suggested.slice(18), sub: becauseTag, dismiss: true },
+    'd-trending': { items: d.trending.slice(0, 18), spares: d.trending.slice(18), sub: starTag, dismiss: true },
   };
   main.innerHTML = `
     <div class="tonight-bar">${typeBar()}<button id="d-shuffle" class="small">🎲 Shuffle</button></div>
     ${d.suggested.length ? `<div class="section-title">Suggested for you</div>
       <div class="grid" data-pool="d-suggested">${state.pools['d-suggested'].items.map((r) =>
-        posterCard(r, becauseTag(r))).join('')}</div>`
+        posterCard(r, becauseTag(r), true)).join('')}</div>`
       : '<div class="empty">Add a few things to your lists and suggestions appear here.</div>'}
     <div class="section-title">Trending</div>
     <div class="grid" data-pool="d-trending">${state.pools['d-trending'].items.map((r) =>
-      posterCard(r, starTag(r))).join('')}</div>`;
+      posterCard(r, starTag(r), true)).join('')}</div>
+    <div class="section-title collapser" id="ni-toggle" style="margin-top:28px">
+      <span class="chev">${state.niOpen ? '▾' : '▸'}</span> 🚫 Not interested</div>
+    <div id="ni-body" ${state.niOpen ? '' : 'hidden'}></div>`;
   main.querySelector('#d-shuffle').onclick = () => { state.discover = null; renderMain(); };
+  main.querySelector('#ni-toggle').onclick = () => {
+    state.niOpen = !state.niOpen;
+    renderMain();
+  };
+  if (state.niOpen) loadNotInterested();
   wireTypeBar(main);
   wireCards(main);
 }
 
+// The "not interested" management list at the bottom of Discover.
+async function loadNotInterested() {
+  const el = document.getElementById('ni-body');
+  if (!el) return;
+  el.innerHTML = '<div class="dim">Loading…</div>';
+  const { items } = await api('/not-interested');
+  const el2 = document.getElementById('ni-body');
+  if (!el2) return;
+  el2.innerHTML = items.length ? items.map((n) => `
+    <div class="scrobble">
+      ${n.poster ? `<img class="sugg-poster" src="${esc(n.poster)}" alt="">` : ''}
+      <div class="what"><div class="title">${esc(n.title || 'Untitled')}</div>
+        <div class="dim">hidden from Discover</div></div>
+      <button class="small" data-restore="${n.tmdb_id}:${esc(n.media_type)}">Show again</button>
+    </div>`).join('')
+    : '<div class="dim" style="margin-bottom:14px">Nothing hidden — press ✕ on a Discover card to hide it here.</div>';
+  el2.querySelectorAll('[data-restore]').forEach((b) => {
+    b.onclick = async () => {
+      const [id, mt] = b.dataset.restore.split(':');
+      await api('/not-interested', { method: 'POST', body: { action: 'restore', tmdbId: Number(id), mediaType: mt } });
+      loadNotInterested();
+    };
+  });
+}
+
 // ---------------------------------------------------------------- title modal
 
-function closeModal() { document.querySelector('.overlay')?.remove(); }
+function closeModal() {
+  const overlays = document.querySelectorAll('.overlay');
+  overlays[overlays.length - 1]?.remove();
+}
 
 async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
   const overlay = document.createElement('div');
@@ -704,6 +771,18 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
         <button data-status="watched">Watched</button>
         ${t.mediaType === 'tv' ? '<button data-pick-eps>Seasons & episodes…</button>' : ''}
       </div>
+      ${(() => {
+        const my = mine.find((i) => i.owner_key === `u${state.me.user.id}`);
+        if (!my) return '';
+        const theirs = mine.find((i) => i.owner_key !== `u${state.me.user.id}`);
+        return `<div class="controls-label" style="margin-top:12px">My rating</div>
+          <div class="stars" data-rate-id="${my.id}">
+            ${Array.from({ length: 10 }, (_, i) => i + 1).map((n) =>
+              `<button class="star ${my.rating >= n ? 'on' : ''}" data-star="${n}" title="${n}/10">★</button>`).join('')}
+            <span class="dim" data-rate-label>${my.rating ? `${my.rating}/10` : 'not rated'}</span>
+          </div>
+          ${theirs?.rating ? `<div class="dim">${esc(state.me.partner?.name || 'Partner')}: ${theirs.rating}/10</div>` : ''}`;
+      })()}
       ${mine.length ? `<div class="dim" style="margin-top:8px">Already on: ${mine.map((i) => {
         const isMe = i.owner_key === `u${state.me.user.id}`;
         const label = isMe ? 'my list' : `${esc(state.me.partner?.name || 'partner')}'s list`;
@@ -743,19 +822,42 @@ async function openTitle(mediaType, tmdbId, resolveScrobble = null) {
         || '<div class="dim" style="margin-top:6px">Not currently available to stream in your region.</div>'}
     </div>
     ${t.similar?.length ? `<div class="controls-label" style="margin-top:14px">More like this</div>
-      <div class="similar">${t.similar.map((s) =>
-        `<img src="${esc(s.poster)}" alt="${esc(s.title)}" title="${esc(s.title)}" data-similar="${s.mediaType}:${s.tmdbId}" loading="lazy">`).join('')}</div>` : ''}
+      <div class="similar">${t.similar.map((s) => {
+        const m2 = myRow(s.mediaType, s.tmdbId);
+        const pl = encodeURIComponent(JSON.stringify({
+          tmdbId: s.tmdbId, mediaType: s.mediaType, title: s.title,
+          poster: s.poster, year: s.year || '', tmdbRating: s.tmdbRating ?? null,
+        }));
+        return `<div class="card sim" data-open="${s.mediaType}:${s.tmdbId}" title="${esc(s.title)}">
+          <div class="qbtns">
+            <button class="qbtn ${m2?.status === 'want' ? 'on' : ''}" data-qwant="${pl}">+</button>
+            <button class="qbtn ${m2?.status === 'watched' ? 'on' : ''} ${m2?.status === 'watching' ? 'half' : ''}" data-qwatch="${pl}">✓</button>
+          </div>
+          <img src="${esc(s.poster)}" alt="" loading="lazy">
+        </div>`;
+      }).join('')}</div>` : ''}
     ${resolveControls}`;
 
   const modal = overlay.querySelector('.modal');
   modal.querySelector('.close').onclick = closeModal;
-  modal.querySelectorAll('[data-similar]').forEach((el) => {
-    el.onclick = () => {
-      const [mt, id] = el.dataset.similar.split(':');
-      closeModal();
-      openTitle(mt, Number(id), resolveScrobble);
-    };
-  });
+  wireCards(modal); // the More-like-this mini cards: open + quick add/watched
+
+  const starsEl = modal.querySelector('[data-rate-id]');
+  if (starsEl) {
+    starsEl.querySelectorAll('[data-star]').forEach((sb) => {
+      sb.onclick = async () => {
+        const cur = mine.find((i) => i.owner_key === `u${state.me.user.id}`);
+        const n = Number(sb.dataset.star);
+        const next = cur.rating === n ? 0 : n; // click your current rating to clear
+        await api(`/lists/${starsEl.dataset.rateId}`, { method: 'PATCH', body: { rating: next } });
+        cur.rating = next || null;
+        starsEl.querySelectorAll('[data-star]').forEach((x) =>
+          x.classList.toggle('on', next >= Number(x.dataset.star)));
+        starsEl.querySelector('[data-rate-label]').textContent = next ? `${next}/10` : 'not rated';
+        fetchListsQuiet(); // background sync so Tonight/Discover learn from it
+      };
+    });
+  }
 
   const pick = (sel) => {
     modal.querySelectorAll(sel).forEach((b) => {
@@ -1002,7 +1104,7 @@ function animateReplace(card, pool, removedKey) {
     const grid = card.parentElement;
     if (spare && grid) {
       const tmp = document.createElement('div');
-      tmp.innerHTML = posterCard(spare, p.sub ? p.sub(spare) : '');
+      tmp.innerHTML = posterCard(spare, p.sub ? p.sub(spare) : '', !!p.dismiss);
       const el = tmp.firstElementChild;
       el.classList.add('card-in');
       card.replaceWith(el);

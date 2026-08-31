@@ -349,9 +349,13 @@ export async function onRequest(context) {
       const seedRows = mineRows
         .filter((r) => r.status !== 'want' &&
           (scope !== 'us' || !partnerRow || theirsMap.has(`${r.media_type}:${r.tmdb_id}`)))
-        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        .sort((a, b) => ((b.rating || 5) + Math.random() * 3) - ((a.rating || 5) + Math.random() * 3))
         .slice(0, 3);
       const inLists = new Set(rows.map((r) => `${r.media_type}:${r.tmdb_id}`));
+      const { results: niRows } = await env.DB.prepare(
+        'SELECT tmdb_id, media_type FROM not_interested WHERE user_id = ?'
+      ).bind(user.id).all();
+      const niSet = new Set(niRows.map((r) => `${r.media_type}:${r.tmdb_id}`));
       const recs = await Promise.all(seedRows.map((s) =>
         tmdb(env, `/${s.media_type}/${s.tmdb_id}/recommendations`).catch(() => ({ results: [] }))));
       const fresh = [];
@@ -360,7 +364,7 @@ export async function onRequest(context) {
         for (const r of (data.results || []).slice(0, 8)) {
           const type = r.media_type || seedRows[i].media_type;
           const key = `${type}:${r.id}`;
-          if (inLists.has(key) || freshKeys.has(key) || !r.poster_path) continue;
+          if (inLists.has(key) || niSet.has(key) || freshKeys.has(key) || !r.poster_path) continue;
           freshKeys.add(key);
           fresh.push({ ...mapSearchResult(r), mediaType: type, because: seedRows[i].title });
         }
@@ -384,9 +388,16 @@ export async function onRequest(context) {
         'SELECT DISTINCT tmdb_id, media_type, title, rating, updated_at FROM list_items ORDER BY updated_at DESC'
       ).all();
       const inLists = new Set(listRows.map((r) => `${r.media_type}:${r.tmdb_id}`));
+      const { results: niRows } = await env.DB.prepare(
+        'SELECT tmdb_id, media_type FROM not_interested WHERE user_id = ?'
+      ).bind(user.id).all();
+      const notInterested = new Set(niRows.map((r) => `${r.media_type}:${r.tmdb_id}`));
 
-      // Different every load: random seed picks, random trending page/window.
-      const seeds = [...listRows].sort(() => Math.random() - 0.5).slice(0, 5);
+      // Different every load: seed picks weighted by your ratings, random
+      // trending page/window.
+      const seeds = [...listRows]
+        .sort((a, b) => ((b.rating || 5) + Math.random() * 5) - ((a.rating || 5) + Math.random() * 5))
+        .slice(0, 5);
       const trendWindow = Math.random() < 0.5 ? 'day' : 'week';
       const trendPage = 1 + Math.floor(Math.random() * 5);
 
@@ -402,7 +413,7 @@ export async function onRequest(context) {
       const trending = (trendingData.results || [])
         .map((r) => ({ ...r, media_type: r.media_type || dType }))
         .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path &&
-          !inLists.has(`${r.media_type}:${r.id}`))
+          !inLists.has(`${r.media_type}:${r.id}`) && !notInterested.has(`${r.media_type}:${r.id}`))
         .sort(() => Math.random() - 0.5)
         .slice(0, 30)
         .map(mapSearchResult);
@@ -413,7 +424,7 @@ export async function onRequest(context) {
         for (const r of (data.results || []).slice(0, 12)) {
           const type = r.media_type || seeds[i].media_type;
           const key = `${type}:${r.id}`;
-          if (inLists.has(key) || !r.poster_path) continue;
+          if (inLists.has(key) || notInterested.has(key) || !r.poster_path) continue;
           if (dType !== 'all' && type !== dType) continue;
           const entry = scored.get(key);
           if (entry) entry.score += 1;
@@ -522,10 +533,40 @@ export async function onRequest(context) {
     if (listItemMatch && method === 'PATCH') {
       const b = await request.json();
       if (b.status && !['want', 'watching', 'watched'].includes(b.status)) return err('bad status');
-      await env.DB.prepare(
-        `UPDATE list_items SET status = COALESCE(?, status), rating = COALESCE(?, rating),
-         updated_at = datetime('now') WHERE id = ?`
-      ).bind(b.status || null, b.rating ?? null, Number(listItemMatch[1])).run();
+      const rowId = Number(listItemMatch[1]);
+      if (b.status) {
+        await env.DB.prepare(
+          "UPDATE list_items SET status = ?, updated_at = datetime('now') WHERE id = ?"
+        ).bind(b.status, rowId).run();
+      }
+      if ('rating' in b) {
+        // rating: 1–10, or 0/null to clear.
+        await env.DB.prepare(
+          "UPDATE list_items SET rating = ?, updated_at = datetime('now') WHERE id = ?"
+        ).bind(b.rating || null, rowId).run();
+      }
+      return json({ ok: true });
+    }
+
+    // ----- "not interested" (per-user; hides titles from Discover)
+    if (path === '/not-interested' && method === 'GET') {
+      const { results } = await env.DB.prepare(
+        'SELECT * FROM not_interested WHERE user_id = ? ORDER BY created_at DESC'
+      ).bind(user.id).all();
+      return json({ items: results });
+    }
+    if (path === '/not-interested' && method === 'POST') {
+      const b = await request.json();
+      if (!b.tmdbId || !['movie', 'tv'].includes(b.mediaType)) return err('missing fields');
+      if (b.action === 'restore') {
+        await env.DB.prepare(
+          'DELETE FROM not_interested WHERE user_id = ? AND tmdb_id = ? AND media_type = ?'
+        ).bind(user.id, b.tmdbId, b.mediaType).run();
+      } else {
+        await env.DB.prepare(
+          'INSERT OR IGNORE INTO not_interested (user_id, tmdb_id, media_type, title, poster) VALUES (?, ?, ?, ?, ?)'
+        ).bind(user.id, b.tmdbId, b.mediaType, b.title || '', b.poster || null).run();
+      }
       return json({ ok: true });
     }
 
