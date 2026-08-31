@@ -11,6 +11,7 @@ const state = {
   partnerName: null,
   tonight: null,
   tonightScope: 'us',
+  newEps: null,
   discover: null,
   search: { q: '', results: null },
   authMode: 'login',
@@ -137,7 +138,12 @@ function render() {
     renderAuth();
   };
   document.querySelectorAll('[data-tab]').forEach((b) => {
-    b.onclick = () => { state.tab = b.dataset.tab; state.search.results = null; render(); };
+    b.onclick = () => {
+      state.tab = b.dataset.tab;
+      state.search.results = null;
+      if (b.dataset.tab === 'discover') state.discover = null; // fresh finds every visit
+      render();
+    };
   });
   const box = document.getElementById('search-box');
   let timer;
@@ -411,6 +417,7 @@ async function renderTonight(main) {
       <button id="shuffle" class="small">🎲 Shuffle</button>
     </div>
     ${hero}
+    <div id="new-eps"></div>
     ${t.continueWatching.length ? `<div class="section-title">Continue watching</div>
       <div class="grid">${t.continueWatching.map(asCard).join('')}</div>` : ''}
     ${t.startSomething.length ? `<div class="section-title">Start something</div>
@@ -420,6 +427,63 @@ async function renderTonight(main) {
   });
   main.querySelector('#shuffle').onclick = () => { state.tonight = null; renderMain(); };
   wireCards(main);
+  loadNewEpisodes();
+}
+
+// Fills the #new-eps slot on the Tonight tab: latest aired episodes of shows
+// you've been watching that either of you hasn't ticked yet, plus air dates
+// of upcoming ones. Loaded separately because it checks TMDB per show.
+async function loadNewEpisodes() {
+  const slot = document.getElementById('new-eps');
+  if (!slot) return;
+  if (!state.newEps) {
+    slot.innerHTML = '<div class="dim" style="margin:6px 0 14px">Checking for new episodes…</div>';
+    try {
+      state.newEps = await api('/new-episodes');
+    } catch { slot.innerHTML = ''; return; }
+  }
+  const el = document.getElementById('new-eps');
+  if (!el) return; // user switched tabs while we fetched
+  const { newEpisodes, upcoming } = state.newEps;
+  const pn = state.me.partner ? esc(state.me.partner.name) : null;
+  const fmtDate = (d) => d ? new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
+  el.innerHTML = `
+    ${newEpisodes.length ? `<div class="section-title">🆕 New episodes out</div>
+      ${newEpisodes.map((e) => {
+        const behind = [!e.meSeen && 'you', pn && !e.partnerSeen && pn].filter(Boolean).join(' and ');
+        const payload = encodeURIComponent(JSON.stringify(e));
+        return `
+          <div class="scrobble">
+            ${e.poster ? `<img class="sugg-poster" src="${esc(e.poster)}" alt="">` : ''}
+            <div class="what">
+              <div class="title">${esc(e.title)} — S${e.season} E${e.episode}${e.episodeTitle ? ` · “${esc(e.episodeTitle)}”` : ''}</div>
+              <div class="dim">aired ${fmtDate(e.airDate)} · still to watch: ${behind}</div>
+            </div>
+            ${!e.meSeen ? `<button class="primary small" data-seen="${payload}">✓ Seen it</button>` : ''}
+            <button class="small" data-eps-open="${payload}">Episodes…</button>
+          </div>`;
+      }).join('')}` : ''}
+    ${upcoming.length ? `<div class="section-title">Coming soon</div>
+      <div style="margin-bottom:14px">${upcoming.map((u) =>
+        `<div class="dim" style="margin:4px 0">${esc(u.title)} — S${u.season} E${u.episode} lands ${fmtDate(u.airDate)}</div>`).join('')}</div>` : ''}`;
+  el.querySelectorAll('[data-seen]').forEach((b) => {
+    b.onclick = async () => {
+      const e = JSON.parse(decodeURIComponent(b.dataset.seen));
+      b.disabled = true;
+      await api('/episodes', { method: 'POST', body: {
+        tmdbId: e.tmdbId, season: e.season, episode: e.episode, watched: true,
+        totalEpisodes: e.totalEpisodes, title: e.title, poster: e.poster,
+      }});
+      state.newEps = null;
+      await syncLists();
+    };
+  });
+  el.querySelectorAll('[data-eps-open]').forEach((b) => {
+    b.onclick = () => {
+      const e = JSON.parse(decodeURIComponent(b.dataset.epsOpen));
+      openEpisodePicker({ tmdbId: e.tmdbId, mediaType: 'tv', title: e.title, poster: e.poster });
+    };
+  });
 }
 
 // ---------------------------------------------------------------- discover
@@ -432,12 +496,14 @@ async function renderDiscover(main) {
   }
   const d = state.discover;
   main.innerHTML = `
+    <div class="tonight-bar"><span class="dim">Fresh picks every visit</span><button id="d-shuffle" class="small">🎲 Shuffle</button></div>
     ${d.suggested.length ? `<div class="section-title">Suggested for you</div>
       <div class="grid">${d.suggested.map((r) =>
         posterCard(r, r.because ? `<span title="Because you added ${esc(r.because)}">↖ ${esc(r.because.length > 14 ? r.because.slice(0, 13) + '…' : r.because)}</span>` : '')).join('')}</div>`
       : '<div class="empty">Add a few things to your lists and suggestions appear here.</div>'}
-    <div class="section-title">Trending this week</div>
+    <div class="section-title">Trending</div>
     <div class="grid">${d.trending.map((r) => posterCard(r, r.tmdbRating ? `★ ${r.tmdbRating}` : '')).join('')}</div>`;
+  main.querySelector('#d-shuffle').onclick = () => { state.discover = null; renderMain(); };
   wireCards(main);
 }
 
@@ -725,6 +791,7 @@ async function refresh() {
   state.partnerName = sugg.partnerName;
   state.tonight = null;   // list changes alter tonight's picks
   state.discover = null;  // and the suggestion seeds
+  state.newEps = null;
   render();
 }
 

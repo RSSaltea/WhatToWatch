@@ -322,20 +322,23 @@ export async function onRequest(context) {
       ).all();
       const inLists = new Set(listRows.map((r) => `${r.media_type}:${r.tmdb_id}`));
 
-      // Seeds: highest-rated first, then most recent activity.
-      const seeds = [...listRows]
-        .sort((a, b) => (b.rating || 0) - (a.rating || 0))
-        .slice(0, 5);
+      // Different every load: random seed picks, random trending page/window.
+      const seeds = [...listRows].sort(() => Math.random() - 0.5).slice(0, 5);
+      const trendWindow = Math.random() < 0.5 ? 'day' : 'week';
+      const trendPage = 1 + Math.floor(Math.random() * 5);
 
       const [trendingData, ...recData] = await Promise.all([
-        tmdb(env, '/trending/all/week'),
+        tmdb(env, `/trending/all/${trendWindow}`, { page: trendPage }),
         ...seeds.map((s) =>
-          tmdb(env, `/${s.media_type}/${s.tmdb_id}/recommendations`).catch(() => ({ results: [] }))
+          tmdb(env, `/${s.media_type}/${s.tmdb_id}/recommendations`, {
+            page: 1 + Math.floor(Math.random() * 2),
+          }).catch(() => ({ results: [] }))
         ),
       ]);
 
       const trending = (trendingData.results || [])
         .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path)
+        .sort(() => Math.random() - 0.5)
         .slice(0, 18)
         .map(mapSearchResult);
 
@@ -355,9 +358,10 @@ export async function onRequest(context) {
         }
       });
       const suggested = [...scored.values()]
-        .sort((a, b) => b.score - a.score || (b.tmdbRating || 0) - (a.tmdbRating || 0))
+        .map((s) => ({ ...s, jitter: s.score + Math.random() * 1.5 }))
+        .sort((a, b) => b.jitter - a.jitter)
         .slice(0, 18)
-        .map(({ score, ...s }) => s);
+        .map(({ score, jitter, ...s }) => s);
 
       return json({ trending, suggested });
     }
@@ -449,6 +453,55 @@ export async function onRequest(context) {
          updated_at = datetime('now') WHERE id = ?`
       ).bind(b.status || null, b.rating ?? null, Number(listItemMatch[1])).run();
       return json({ ok: true });
+    }
+
+    // ----- new/upcoming episodes for shows the household has been watching
+    if (path === '/new-episodes') {
+      const p = await env.DB.prepare('SELECT id, name FROM users WHERE id != ?').bind(user.id).first();
+      const { results: shows } = await env.DB.prepare(
+        `SELECT DISTINCT tmdb_id, title, poster FROM list_items
+         WHERE media_type = 'tv' AND status IN ('watching', 'watched')
+         AND owner_key IN (?, ?) LIMIT 25`
+      ).bind(`u${user.id}`, p ? `u${p.id}` : 'u-none').all();
+      const { results: watchRows } = await env.DB.prepare(
+        'SELECT user_id, tmdb_id, season, episode FROM episode_watches WHERE user_id IN (?, ?)'
+      ).bind(user.id, p?.id ?? -1).all();
+      const seen = new Set(watchRows.map((r) => `${r.user_id}:${r.tmdb_id}:${r.season}:${r.episode}`));
+      const details = await Promise.all(
+        shows.map((s) => tmdb(env, `/tv/${s.tmdb_id}`).catch(() => null))
+      );
+      const newEpisodes = [], upcoming = [];
+      details.forEach((d, i) => {
+        if (!d) return;
+        const s = shows[i];
+        const totalEpisodes = (d.seasons || [])
+          .filter((x) => x.season_number > 0)
+          .reduce((a, x) => a + x.episode_count, 0);
+        const last = d.last_episode_to_air;
+        if (last?.season_number) {
+          const meSeen = seen.has(`${user.id}:${s.tmdb_id}:${last.season_number}:${last.episode_number}`);
+          const partnerSeen = p ? seen.has(`${p.id}:${s.tmdb_id}:${last.season_number}:${last.episode_number}`) : true;
+          if (!meSeen || !partnerSeen) {
+            newEpisodes.push({
+              tmdbId: s.tmdb_id, title: s.title || d.name, poster: s.poster,
+              season: last.season_number, episode: last.episode_number,
+              episodeTitle: last.name, airDate: last.air_date,
+              meSeen, partnerSeen, totalEpisodes,
+            });
+          }
+        }
+        const next = d.next_episode_to_air;
+        if (next?.air_date) {
+          upcoming.push({
+            tmdbId: s.tmdb_id, title: s.title || d.name,
+            season: next.season_number, episode: next.episode_number,
+            airDate: next.air_date,
+          });
+        }
+      });
+      newEpisodes.sort((a, b) => (b.airDate || '').localeCompare(a.airDate || ''));
+      upcoming.sort((a, b) => (a.airDate || '').localeCompare(b.airDate || ''));
+      return json({ newEpisodes, upcoming, partnerName: p?.name || null });
     }
 
     // ----- partner suggestions (things on their list that aren't on yours)
